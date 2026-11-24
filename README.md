@@ -28,74 +28,52 @@ GEMINI_API_KEY=your_key_here
 或通过 Codex 环境的 secret / 环境变量注入 `GEMINI_API_KEY`，不用创建 `.env`。
 不要把 Key 写入命令参数、聊天记录、配置仓库或日志。程序只读取它，不输出它。
 
-```bash
-python pipeline.py --input video.mp4 --count 20 --output ./output
-```
-
-没有 Key 时，必须明确选择离线处理；不会假装完成 Gemini 语义评分：
+### 1. 本地准备候选
 
 ```bash
-python pipeline.py --input video.mp4 --count 20 --output ./output --offline
+python pipeline.py --prepare --input video.mp4 --output runs/job-001 --candidates 48
 ```
 
-离线模式可以真实执行解码、OCR、传统/时序修复及确定性质检。复杂背景或来源不明的文字会进入审核，
-不会为了凑足数量降低标准。
+这一步无需 API Key。FFmpeg/OpenCV 解码，PySceneDetect 辅助检测切镜，再做本地清晰度、曝光、对比度和去重筛选。
+按时间顺序查看 `selection/sheet-*.png`，或从 `selection/index.json` 打开候选原图。
+Codex 对照用户本次 prompt 判断主体、动作时机和构图，确认入选 ID 并记录理由。素材类型不限。
+若目标动作不在候选里，可在新目录增加 `--candidates`，并通过 TOML 缩短 `video.sample_seconds` 或增大 `video.max_scan_samples`。
+默认采样间隔为 0.5 秒，长视频会自动放宽。默认最多保留 96 个候选。
 
-## 常用命令
-
-| 任务 | 命令 / 选项 |
-|---|---|
-| 限制候选及 API 消耗 | `--candidates 60 --budget-calls 30 --budget-usd 1.5` |
-| 断点续跑 | 原命令追加 `--resume` |
-| 只审计已有 PNG | `python pipeline.py --output ./output --qc-only` |
-| 指定字幕模式 | `--subtitle-mode auto` / `subtitle` / `all` / `manual` |
-| 保留候选和邻帧 | `--keep-intermediates` |
-| 加载自定义参数 | `--config configs/my-video.toml` |
-| 无真实 API 的接口测试 | `--mock-gemini`，报告明确标记 Mock |
-| 顺序批量处理 | 重复 `--input a.mp4 --input b.mp4 --output ./batch` |
-
-批处理在独立子目录保存每个视频；一次命令共享调用数/预留费用预算，顺序执行，不同时装载多个视频。
-`--resume` 不允许更换输入内容、模型、OCR/掩码/质检语义配置或 count；改变这些设置应使用新输出目录。
-可以调整调用预算、超时、限流、线程数和临时文件保留选项。
-
-直接视频 URL：
+### 2. 仅重绘明确选中的帧
 
 ```bash
-python pipeline.py --input 'https://example.com/authorized-video.mp4' \
-  --count 10 --output ./url-output --budget-calls 20
+python pipeline.py --input video.mp4 --output runs/job-001 \
+  --select-frame f00000060 --select-frame f00000120 \
+  --subtitle-mode subtitle --budget-calls 8 --budget-usd 2
 ```
 
-仅支持可直接下载的 HTTP(S) 视频。网页、需要登录/Cookie 的平台视频、HLS/DASH 播放列表不支持。
-不集成 yt-dlp 或浏览器。URL 下载有大小、超时、重定向和私网地址限制，仍只应处理自己信任且有权使用的媒体。
+把示例 ID 换成候选索引中的实际 ID，按交付优先级排列。程序核对视频指纹、候选原图和帧 ID，
+处理数量由选中的 ID 决定。帧不通过时记录缺额。没有目标字幕的帧不会计为去字成品。
 
-## 处理流程
+RapidOCR 在本地定位文字。程序用邻帧、字幕位置和保护区判断目标文字，文字来源不确定则进入待审核。
+Gemini 只收到选定帧的局部裁剪及遮罩参考图，只负责重绘。选帧、文字判定、视觉复核都由本地流程或 Codex 处理。
+此入口的实际修复只用 Gemini。程序在遮罩内合成候选结果，重读 PNG 检查尺寸、遮罩外像素、OCR 残留、
+疑似笔画、清晰度、融合边缘及重复图。交付前由 Codex 目视核对字幕区域、主体和背景边缘。
 
-1. **单次顺序解码。** 用 FFmpeg 探测格式、OpenCV 解码；PySceneDetect 在采样帧上检测镜头切换。
-   先检查清晰度、曝光、对比度，再按视频时间段选优并用 64-bit DCT pHash 去重。
-2. **少量语义评分。** 缩小后的候选按批交给 Gemini，评估吸引力、主体、构图、产品展示、人物表现和素材价值。
-   不上传整个视频。无预算时记录缺失评分，使用技术分；需要模型才能修复/辨别的帧不因此自动获准通过。
-3. **真实 CPU OCR。** RapidOCR + ONNX Runtime 检出中英文多边形框，坐标始终映射到原分辨率。
-   同一像素图/参数/版本的 OCR 结果按哈希缓存。包内三个 OCR 模型约 30.28 MiB，不额外在线下载模型。
-4. **判定文字性质。** 使用同镜头邻帧文字变化、显式保护词和区域判断。仍不确定时可用 Gemini 只判断
-   “后期覆盖文字 / 真实场景文字 / 不确定”；不采用大模型生成的新坐标。低置信度保留为审核。
-5. **精细 Mask。** 形态学笔画、颜色残差、平滑背景颜色平面，加有限描边/阴影扩展；在水平框两端搜索相邻笔画，
-   补偿 OCR 框截断首字/尾字。遇到可靠性不足的边缘，记录并拒绝通过。不是逐帧完美分割的承诺。
-6. **分级局部修复。** 简单背景用 OpenCV；再尝试同镜头邻帧配准和无文字 donor；可选用户提供的 ONNX；
-   最后才调用 Gemini 局部 crop 编辑。每张图最多 3 次有效图像尝试，网络重试也纳入 API 调用账本。
-7. **局部合成与审核。** 复制原图，只改最终掩码范围；羽化支持也进入最终掩码，保护区再次恢复原像素。
-   PNG 保存后重读，检查尺寸、掩码外完全一致、OCR 残留、疑似孤立描边、清晰度、融合边缘和重复图。
-   生成式修复还必须通过 Gemini 局部视觉复核；模型复核不能推翻确定性失败。
-8. **只交付通过图片。** 不足数时输出 partial 和实际数量。失败或不确定的图片不进入 `images/`。
+### 3. 审计与续跑
 
-采样默认 0.5 秒，长视频会自动放宽，最多 600 个采样点；镜头检测是采样级近似，可能漏掉极短镜头。
-可以在配置中减小 `sample_seconds`、提高 `max_scan_samples`。保留候选上限默认 96，
-自动数量为 `min(max_candidates, max(3*count, ceil(duration/4)))`。
+```bash
+python pipeline.py --output runs/job-001 --qc-only
+```
+
+可恢复故障后将原编辑命令追加 `--resume`，保留原输入、输出目录、帧 ID 顺序和语义配置。
+两个阶段各接收一个视频，`--input` 支持本地文件或可直接下载的 HTTP(S) 视频。
+登录页、HLS/DASH 播放列表和私网地址不可用。下载受大小和超时限制。
+
+`--offline` 和 `--mock-gemini` 仍可用于隔离的本地验证及接口测试。带 `--select-frame` 时可用 Mock 测试选帧到改绘的边界。
+生产流程按上述两个阶段执行。
 
 ## 字幕模式与真实文字保护
 
 | 模式 | 行为 |
 |---|---|
-| `auto`（默认） | 保守使用时序变化和可选语义辅助；不确定文字进入 review。最适合完整 API 工作流。 |
+| `auto`（默认） | 保守使用时序变化；不确定文字进入 review。 |
 | `subtitle` | 明确允许擦除底部字幕带内的横行文字；其他文字仍须判断/保护。 |
 | `all` | 擦除所有 OCR 检出的文字，保护词/区域优先；可能包含真实包装/招牌，只在你明确需要时使用。 |
 | `manual` | 使用给定像素矩形或多边形；无需让模型猜框。 |
@@ -133,21 +111,18 @@ protect_regions = [[500, 100, 650, 180]]
 
 ## Gemini 模型、费用和失败处理
 
-模型由 `configs/default.toml` 配置；环境变量 `GEMINI_ANALYSIS_MODEL` / `GEMINI_IMAGE_MODEL` 可覆盖。
-当前调研采用 `gemini-3.1-flash-lite` 做分析，`gemini-nano-banana-2.1` 做局部图像编辑。
-这两个模型 ID 不嵌入业务代码；可按账号可用性修改。价格、官方来源和接口限制见 `docs/research-gemini.md`。
-
-**本次没有真实 API Key：SDK 请求类型、预算、缓存、重试、结构化输出和 crop/edit 路径通过 Mock 测试；
-真实模型可用性、输出质量、实际账单未实测。**
+选帧工作流使用 `configs/default.toml` 中的 `gemini-nano-banana-2.1`，默认输出 1K 裁剪图，
+最终 PNG 采用原帧分辨率。`GEMINI_IMAGE_MODEL` 可覆盖图像模型。价格和接口限制见 `docs/research-gemini.md`。
 
 - `max_calls` 是所有实际请求尝试的硬上限，包括失败与重试。
 - `max_cost_usd` 限制本地保守预留金额，**不是 Google 账单硬上限**。请求前预留，失败或进程崩溃也不退回，
   避免“服务端已计费但客户端未收到响应”导致低估。实际账单以 Google 控制台为准。
 - 报告分别给出 reserved cost、按配置价格/返回 usage 估算的 cost、估算是否完整、缓存命中及各模型调用数。
 - 更换模型时同步提供 `[gemini.prices."model-id"]`；启用美元预算而没有价格时停止该调用。
-- SDK 内部重试、自动 continuation、自动函数调用关闭；程序只使用一层有界重试，默认一次请求最多 3 次尝试。
+- SDK 内部重试、自动 continuation、自动函数调用关闭。网络请求默认零自动重试；单帧的质检改绘尝试仍受任务预算约束。
 - 同一输入、模型、提示词、配置和图像的结果可复用；API 请求账本在进程间加锁并持久保存。
-- 429/暂时服务错误按退避重试；预算不足或网络失败的候选保存为可恢复状态。提高已授权预算后 `--resume`。
+- 工作流默认串行。Banana 2.1 本地上限为 10 RPM、160,000 估算输入 TPM、800 RPD，按太平洋时间午夜重置。
+  额度账本在本仓库各输出目录间共享。预算或网络故障保存为可恢复状态，可在问题解除后 `--resume`。
 - Mock 与真实请求使用隔离账本和缓存；报告不会把 Mock 次数计作真实 API。
 
 原生 Gemini 编辑不是精确像素 Mask API。本项目发送局部原图及区域提示，返回仅作 proposal；
@@ -173,7 +148,7 @@ onnx_model = "/absolute/path/to/licensed-model.onnx"
 `masks` 为二值最终修改支持区，包含羽化范围。`originals` 和通过图对应，不能为节省空间删掉后仍宣称可复核。
 
 额外 `.checkpoint.json`、`.cache/ocr/`、`.cache/gemini/` 用于续跑和计费缓存；输出目录不会提交到 GitHub。
-完成后默认删除候选、邻帧、临时 PNG 和下载视频；审核预览、成品与对应原图/掩码保留。
+选帧工作流保留候选索引、联系表和原始帧缓存，以便对照与续跑。离线验证完成后默认清理扫描缓存。
 可恢复 API 故障暂时保留候选缓存，供下次续跑。`--keep-intermediates` 可保留完整候选。
 
 首次扫描中途断开时会重新做该次顺序扫描；完成扫描后的中断复用候选，不重复解码。
@@ -214,8 +189,7 @@ Smoke 测试自行生成视频，不下载第三方素材；中英文示例需�
 ## 给 Codex Agent
 
 `AGENTS.md` 固化执行规则；仓库技能在 `.agents/skills/video-frame-studio/SKILL.md`，并提供 UI 元数据。
-它随仓库交付，没有安装到你的全局个人技能目录。日常模型只需执行 CLI、阅读短报告和交付结果。
-不要为每个视频重写提示词或编排，不要自动放宽阈值来补足图片数量。
+按用户当次 prompt 查看候选和原帧，记录入选理由后调用改绘。交付前查看成品，并报告任何缺额和可见修复痕迹。
 
 ## 开源调研与许可
 

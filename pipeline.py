@@ -11,7 +11,7 @@ import sys
 
 from vfs.config import load_config, load_dotenv, validate_config, ROOT
 from vfs.util import digest, output_lock
-from vfs.pipeline import run, quality_only
+from vfs.pipeline import run, quality_only, prepare_selection
 
 
 def main(argv=None) -> int:
@@ -25,7 +25,10 @@ def main(argv=None) -> int:
     parser.add_argument("--budget-usd", type=float)
     parser.add_argument("--subtitle-mode", choices=("auto", "subtitle", "all", "manual"))
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--qc-only", action="store_true", help="Audit existing report/files; no Gemini calls or video decode")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--qc-only", action="store_true", help="Audit existing PNGs locally")
+    mode.add_argument("--prepare", action="store_true", help="Generate local candidate sheets without any Gemini calls")
+    mode.add_argument("--select-frame", action="append", help="Edit a prepared frame ID; repeat in priority order")
     provider = parser.add_mutually_exclusive_group()
     provider.add_argument("--offline", action="store_true", help="Skip all Gemini work; keep strict deterministic gates")
     provider.add_argument("--mock-gemini", action="store_true", help="Test only; explicitly simulated AI results")
@@ -41,9 +44,9 @@ def main(argv=None) -> int:
             value = getattr(args, argument)
             if value is not None:
                 cfg[section][key] = value
-        if args.offline:
+        if args.offline or args.prepare:
             cfg["gemini"]["enabled"], cfg["gemini"]["mock"] = False, False
-        if args.mock_gemini:
+        if args.mock_gemini and not args.prepare:
             cfg["gemini"]["enabled"], cfg["gemini"]["mock"] = True, True
         if args.keep_intermediates:
             cfg["run"]["keep_intermediates"] = True
@@ -55,6 +58,19 @@ def main(argv=None) -> int:
             return 0 if result["status"] == "qc_passed" else 2
         if not args.input:
             parser.error("--input is required unless --qc-only")
+        if args.prepare or args.select_frame:
+            if len(args.input) != 1:
+                parser.error("Prepare and selected-frame editing accept one video at a time")
+        if args.prepare:
+            if args.resume:
+                parser.error("--prepare needs a fresh output directory")
+            index = prepare_selection(args.input[0], args.output, cfg)
+            print(f"prepared: {len(index['candidates'])} candidates; {args.output / 'selection/index.json'}")
+            return 0
+        if args.select_frame and args.offline:
+            parser.error("--select-frame requires Gemini image editing")
+        if cfg["gemini"]["enabled"] and not cfg["gemini"]["mock"] and not args.select_frame:
+            parser.error("Prepare candidates locally, then pass explicit --select-frame IDs")
         if cfg["gemini"]["enabled"] and not cfg["gemini"]["mock"] and not os.getenv(cfg["gemini"]["api_key_env"]):
             raise ValueError("GEMINI_API_KEY is missing. Configure .env, or use --offline / --mock-gemini explicitly")
         exit_code = 0
@@ -69,7 +85,7 @@ def main(argv=None) -> int:
             # video's persistent ledger still includes its own previous attempts.
             job_config["gemini"]["max_calls"] = max(0, cfg["gemini"]["max_calls"] - batch_calls_used)
             job_config["gemini"]["max_cost_usd"] = max(0., cfg["gemini"]["max_cost_usd"] - batch_reserved_used)
-            report = run(source, output, job_config, args.resume)
+            report = run(source, output, job_config, args.resume, selected=args.select_frame)
             batch_calls_used += report["api"].get("calls", 0)
             batch_reserved_used += report["api"].get("reserved_cost_usd", 0.)
             passed = sum(item["status"] == "passed" for item in report["items"])

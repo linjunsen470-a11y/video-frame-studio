@@ -197,7 +197,7 @@ def prepare_run(monkeypatch, tmp_path, images):
     source.write_bytes(b"fixture input identity; decoding replaced by known PNG candidates")
     output = tmp_path / "result"
     scans = []
-    def fake_scan(path, destination, video_cfg, selection, count, source_hash, resume):
+    def fake_scan(path, destination, video_cfg, selection, count, source_hash, resume=False):
         scans.append(resume)
         rows = [candidate(destination, image, f"frame{i:03d}", i) for i, image in enumerate(images, 1)]
         return {"candidates": rows, "warnings": [], "video": {"duration": len(images)},
@@ -263,3 +263,42 @@ def test_budget_shortfall_can_resume_after_raising_budget(tmp_path, config, monk
     assert resumed["status"] == "complete"
     assert resumed["items"][0]["status"] == "passed"
     assert resumed["api"]["mock_calls"] == 3  # reuse original ranking, spend only edit/review
+
+def test_selected_workflow_prepares_locally_and_sends_only_explicit_edits(tmp_path, config, monkeypatch):
+    source, output, scans = prepare_run(monkeypatch, tmp_path, [synthetic(), synthetic(2)])
+    with monkeypatch.context() as isolated:
+        def unexpected_gateway(*args):
+            pytest.fail("local preparation must not create a Gemini gateway")
+
+        isolated.setattr(pipeline, "GeminiGateway", unexpected_gateway)
+        index = pipeline.prepare_selection(str(source), output, config)
+    assert [c["id"] for c in index["candidates"]] == ["frame001", "frame002"]
+    assert (output / "selection/sheet-001.png").is_file()
+    with pytest.raises(ValueError, match="must appear"):
+        pipeline.run(str(source), output, config, selected=["missing"])
+    assert not (output / ".checkpoint.json").exists()
+
+    report = pipeline.run(str(source), output, config, selected=["frame002"])
+    assert report["status"] == "complete"
+    assert report["requested_count"] == 1
+    assert report["api"]["mock_calls"] == 1
+    assert report["api"]["api_calls"] == 0
+    assert report["ranking"] == {}
+    assert len(scans) == 1
+    item, = report["items"]
+    assert item["id"] == "frame002"
+    assert item["ranking"]["source"] == "operator_selected"
+    assert item["method"] == "level4_gemini"
+    assert item["qc"]["outside_changed_pixels"] == 0
+    assert list((output / "images").glob("*.png")) == [output / "images/frame002.png"]
+
+
+def test_selected_workflow_does_not_export_frames_without_target_text(tmp_path, config, monkeypatch):
+    source, output, _ = prepare_run(monkeypatch, tmp_path, [synthetic()])
+    monkeypatch.setattr(pipeline, "OCRDetector", lambda *args: ReferenceDetector([]))
+    pipeline.prepare_selection(str(source), output, config)
+    report = pipeline.run(str(source), output, config, selected=["frame001"])
+    assert report["status"] == "partial"
+    assert report["api"]["mock_calls"] == 0
+    assert report["items"][0]["issues"] == ["no_target_text"]
+    assert not list((output / "images").glob("*.png"))

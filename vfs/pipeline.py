@@ -82,7 +82,8 @@ def _classify_uncertain(image, groups: dict, gateway: GeminiGateway, warnings: l
 
 
 def _candidate(candidate: dict, output: Path, cfg: dict, detector: OCRDetector,
-               gateway: GeminiGateway, existing_hashes: list[str], previous: dict | None = None) -> dict:
+               gateway: GeminiGateway, existing_hashes: list[str], previous: dict | None = None,
+               edit_only: bool = False) -> dict:
     original_path = safe_output_path(output, candidate["path"])
     original = read_image(original_path)
     item = {k: candidate[k] for k in ("id", "time", "frame_index", "scene", "metrics")}
@@ -99,7 +100,8 @@ def _candidate(candidate: dict, output: Path, cfg: dict, detector: OCRDetector,
         donor_mask = polygon_mask(donor_image.shape, donor_regions, 6)
         neighbors.append({"image": donor_image, "mask": donor_mask, "same_scene": True})
     groups = select_regions(regions, original.shape, cfg["ocr"], temporal_regions)
-    classification_failed = _classify_uncertain(original, groups, gateway, item["warnings"])
+    classification_failed = (not edit_only and
+                             _classify_uncertain(original, groups, gateway, item["warnings"]))
     item["text_regions"] = groups
     if groups["uncertain"] and cfg["qc"]["require_no_uncertain_text"]:
         item["issues"] = ["uncertain_text_origin"] + (["semantic_classification_unavailable"] if classification_failed else [])
@@ -123,7 +125,20 @@ def _candidate(candidate: dict, output: Path, cfg: dict, detector: OCRDetector,
             if mask_meta["area_fraction"] > cfg["mask"]["max_area_fraction"]:
                 item["issues"] = ["mask_too_large"]
                 break
-            if not np.any(mask):
+            if edit_only:
+                if not np.any(mask):
+                    item["issues"] = ["selected_text_has_empty_mask" if selected else "no_target_text"]
+                    break
+                if mask_meta.get("edge_search_inconclusive", 0):
+                    trial["qc"] = {"passed": False, "issues": ["mask_edge_uncertain"]}
+                    item["attempts"].append(trial)
+                    item["qc"] = trial["qc"]
+                    continue
+                method = "level4_gemini"
+                proposal = gateway.edit_crop(original, mask, attempt)
+                generated = True
+                trial["gemini_crops"] = gateway.last_edit_info
+            elif not np.any(mask):
                 if selected:
                     item["issues"] = ["selected_text_has_empty_mask"]
                     break
@@ -161,6 +176,9 @@ def _candidate(candidate: dict, output: Path, cfg: dict, detector: OCRDetector,
             # Protection applies to the entire feather support, not just the initial mask.
             final[protection] = original[protection]
             final_mask[protection] = 0
+            if edit_only and np.array_equal(final, original):
+                item["issues"] = ["no_pixels_changed"]
+                break
             stage = output / ".cache/qc"
             staged_image, staged_mask = stage / f"{item['id']}.png", stage / f"{item['id']}_mask.png"
             write_png(staged_image, final)
@@ -171,7 +189,7 @@ def _candidate(candidate: dict, output: Path, cfg: dict, detector: OCRDetector,
                                  protected_regions=groups["protected"])
             if mask_meta.get("edge_search_inconclusive", 0):
                 qc["issues"].append("mask_edge_uncertain")
-            if generated and cfg["qc"]["review_ai_edits"]:
+            if generated and not edit_only and cfg["qc"]["review_ai_edits"]:
                 if gateway.enabled:
                     visual = gateway.review_edit(original, final, final_mask)
                     qc["visual_review"] = visual
@@ -271,26 +289,98 @@ def quality_only(output: Path, config: dict | None = None) -> dict:
     return result
 
 
-def run(input_value: str, output: Path, cfg: dict, resume: bool = False) -> dict:
+def _validate_output_paths(output: Path) -> None:
+    for name in (".cache", "images", "originals", "masks", "previews", ".checkpoint.json", "selection"):
+        child = output / name
+        if child.is_symlink() or (child.is_dir() and any(p.is_symlink() for p in child.rglob("*"))):
+            raise ValueError("Symlinks are not allowed inside managed output paths")
+
+
+def prepare_selection(input_value: str, output: Path, cfg: dict) -> dict:
+    """Decode and publish a chronological candidate index without opening a gateway."""
+    output = output.resolve()
+    with output_lock(output):
+        _validate_output_paths(output)
+        for name in (".checkpoint.json", "report.json", "images", "selection"):
+            if (output / name).exists():
+                raise ValueError("Choose a fresh output directory to prepare candidates")
+        input_path = resolve_input(input_value, output / ".cache/download", cfg["video"])
+        if input_path.is_relative_to(output / ".cache/frames"):
+            raise ValueError("Input cannot be inside the candidate cache")
+        source_hash = file_sha256(input_path)
+        cv2.setNumThreads(int(cfg["run"]["threads"]))
+        video_cfg = {**cfg["video"], "threads": cfg["run"]["threads"]}
+        scan = scan_candidates(input_path, output, video_cfg, cfg["selection"],
+                               cfg["run"]["count"], source_hash)
+        candidates = sorted(scan["candidates"], key=lambda c: c["time"])
+        if not candidates:
+            raise ValueError("No candidates passed the technical filters")
+        index = {"source_sha256": source_hash, "candidates": []}
+        for offset in range(0, len(candidates), 12):
+            batch = candidates[offset:offset+12]
+            canvas = np.zeros((240 * ((len(batch)+2)//3), 960, 3), dtype=np.uint8)
+            for i, candidate in enumerate(batch):
+                path = safe_output_path(output, candidate["path"])
+                image = read_image(path)
+                scale = min(320 / image.shape[1], 210 / image.shape[0], 1.)
+                thumb = cv2.resize(image, (max(1, round(image.shape[1]*scale)),
+                                           max(1, round(image.shape[0]*scale))), interpolation=cv2.INTER_AREA)
+                x, y = (i % 3)*320, (i // 3)*240
+                canvas[y:y+thumb.shape[0], x:x+thumb.shape[1]] = thumb
+                label = f"{candidate['id']}  {candidate['time']:.3f}s"
+                cv2.putText(canvas, label, (x+5, y+232), cv2.FONT_HERSHEY_SIMPLEX,
+                            .55, (235, 235, 235), 1, cv2.LINE_AA)
+                index["candidates"].append({**candidate, "sha256": file_sha256(path)})
+            write_png(output / "selection" / f"sheet-{offset//12+1:03d}.png", canvas)
+        atomic_json(output / "selection/index.json", index)
+        return index
+
+
+def _selected_scan(output: Path, source_hash: str, selected: list[str]) -> dict:
+    if len(set(selected)) != len(selected):
+        raise ValueError("Duplicate --select-frame IDs")
+    index = read_json(output / "selection/index.json")
+    if index["source_sha256"] != source_hash:
+        raise ValueError("Prepared candidates belong to a different input")
+    by_id = {candidate["id"]: candidate for candidate in index["candidates"]}
+    if not set(selected) <= by_id.keys():
+        raise ValueError("Every --select-frame ID must appear in selection/index.json")
+    candidates = [by_id[key] for key in selected]
+    for candidate in candidates:
+        if file_sha256(safe_output_path(output, candidate["path"])) != candidate["sha256"]:
+            raise ValueError("Prepared candidate pixels changed; prepare a fresh output directory")
+    return {"candidates": candidates, "warnings": [], "selection": "operator_selected"}
+
+
+def run(input_value: str, output: Path, cfg: dict, resume: bool = False,
+        selected: list[str] | None = None) -> dict:
     output = output.resolve()
     started = time.monotonic()
+    if selected is None and cfg["gemini"]["enabled"] and not cfg["gemini"]["mock"]:
+        raise ValueError("Live editing requires explicit selection from a prepared candidate index")
+    if selected is not None:
+        if not selected or not cfg["gemini"]["enabled"]:
+            raise ValueError("Selected-frame edit requires frame IDs and an enabled image provider")
+        cfg = copy.deepcopy(cfg)
+        cfg["run"]["count"] = len(selected)
+        cfg["gemini"]["edit_only"] = True
     with output_lock(output):
-        # A user-supplied output tree must not redirect managed writes elsewhere.
-        for name in (".cache", "images", "originals", "masks", "previews", ".checkpoint.json"):
-            child = output / name
-            if child.is_symlink() or (child.is_dir() and any(p.is_symlink() for p in child.rglob("*"))):
-                raise ValueError("Symlinks are not allowed inside managed output paths")
+        _validate_output_paths(output)
         cv2.setNumThreads(int(cfg["run"]["threads"]))
         checkpoint = output / ".checkpoint.json"
         if checkpoint.exists() and not resume:
             raise ValueError("Output already has a run. Use --resume or choose a new output directory")
         if not checkpoint.exists() and any((output / p).exists() for p in ("report.json", "images")):
             raise ValueError("Output contains files without a checkpoint; choose a fresh output directory")
-        cfg_key = digest({"version": __version__, "config": semantic_config(cfg)})
+        config_signature = {"version": __version__, "config": semantic_config(cfg)}
+        if selected is not None:
+            config_signature["selected_frames"] = selected
+        cfg_key = digest(config_signature)
         input_path = resolve_input(input_value, output / ".cache/download", cfg["video"])
         if input_path.is_relative_to(output / ".cache/frames"):
             raise ValueError("Input cannot be inside the candidate cache")
         source_hash = file_sha256(input_path)
+        prepared = _selected_scan(output, source_hash, selected) if selected is not None else None
         if checkpoint.exists():
             state = read_json(checkpoint)
             if state["source_sha256"] != source_hash or state["config_hash"] != cfg_key:
@@ -313,10 +403,10 @@ def run(input_value: str, output: Path, cfg: dict, resume: bool = False) -> dict
         detector = OCRDetector(output / ".cache/ocr", cfg["ocr"])
         try:
             video_cfg = {**cfg["video"], "threads": cfg["run"]["threads"]}
-            scan = scan_candidates(input_path, output, video_cfg, cfg["selection"],
-                                   cfg["run"]["count"], source_hash, resume)
+            scan = prepared if prepared is not None else scan_candidates(
+                input_path, output, video_cfg, cfg["selection"], cfg["run"]["count"], source_hash, resume)
             candidates = scan["candidates"]
-            if gateway.enabled:
+            if gateway.enabled and selected is None:
                 batch_size = cfg["gemini"]["rank_batch_size"]
                 unranked = [c for c in candidates if c["id"] not in state["ranking"]]
                 for start in range(0, len(unranked), batch_size):
@@ -334,7 +424,8 @@ def run(input_value: str, output: Path, cfg: dict, resume: bool = False) -> dict
                 technical = candidate["metrics"]["technical_score"]
                 semantic = state["ranking"].get(candidate["id"], {}).get("score", technical)
                 candidate["rank_score"] = (1 - weight) * technical + weight * semantic
-            candidates.sort(key=lambda c: (-c["rank_score"], c["time"]))
+            if selected is None:
+                candidates.sort(key=lambda c: (-c["rank_score"], c["time"]))
             hashes = []
             for old in state["items"].values():
                 if old["status"] == "passed":
@@ -350,11 +441,13 @@ def run(input_value: str, output: Path, cfg: dict, resume: bool = False) -> dict
                     continue
                 print(f"process: {candidate['id']} at {candidate['time']:.2f}s; {len(hashes)}/{cfg['run']['count']} passed", flush=True)
                 try:
-                    item = _candidate(candidate, output, cfg, detector, gateway, hashes, previous_item)
+                    args = (candidate, output, cfg, detector, gateway, hashes, previous_item)
+                    item = _candidate(*args) if selected is None else _candidate(*args, edit_only=True)
                 except OCRUnavailable:
                     # No OCR = no claim of no subtitles. Keep remaining work resumable.
                     raise
-                item["ranking"] = state["ranking"].get(candidate["id"], {"source": "technical_only"})
+                item["ranking"] = ({"source": "operator_selected"} if selected is not None else
+                                   state["ranking"].get(candidate["id"], {"source": "technical_only"}))
                 state["items"][candidate["id"]] = item
                 if item["status"] == "passed":
                     hashes.append(item["qc"]["phash"])
@@ -372,6 +465,8 @@ def run(input_value: str, output: Path, cfg: dict, resume: bool = False) -> dict
                       "warnings": list(dict.fromkeys(state["warnings"] + scan["warnings"]))}
             if mode.startswith("mock") or detector.is_mock:
                 report["warnings"].append("Mock was enabled: semantic scores/generative quality are NOT real API validation.")
+            if selected is not None:
+                report["warnings"].append("Review repaired regions visually before delivery; automated checks are local.")
             if not gateway.enabled:
                 report["warnings"].append("Offline mode: composition, identity and visual naturalness were not assessed by Gemini.")
             if report["status"] == "partial":
@@ -382,7 +477,7 @@ def run(input_value: str, output: Path, cfg: dict, resume: bool = False) -> dict
             report["resumable"] = recoverable
             write_report(output, report)
             atomic_json(checkpoint, state)
-            if not cfg["run"]["keep_intermediates"] and not recoverable:
+            if selected is None and not cfg["run"]["keep_intermediates"] and not recoverable:
                 for dirname in ("frames", "qc", "download"):
                     shutil.rmtree(output / ".cache" / dirname, ignore_errors=True)
             return report

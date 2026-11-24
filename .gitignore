@@ -21,3 +21,10 @@ artifacts/
 *.safetensors
 *.zip
 .DS_Store
+
+# Local frame-selection jobs, review sheets, reports, and usage ledgers.
+/runs/
+.vfs.lock
+.checkpoint.json
+**/selection/index.json
+**/selection/sheet-*.png

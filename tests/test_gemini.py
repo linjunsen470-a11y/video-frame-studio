@@ -326,3 +326,28 @@ def test_review_threshold_change_invalidates_cached_verdict(tmp_path, cfg):
     install_fake(second, [response])
     assert not second.review_edit(image, image.copy(), mask)["passed"]
     assert second.stats["calls"] == 2
+
+
+def test_shared_quota_separates_models_and_resets_daily_at_pacific_midnight(
+        tmp_path, cfg, monkeypatch):
+    from datetime import datetime, timezone
+
+    cfg["quota"] = {
+        "fallback": {"rpm": 20, "tpm": 100, "rpd": 1},
+        "image-model": {"rpm": 100, "tpm": 200, "rpd": 2},
+    }
+    now = [datetime(2026, 11, 24, 7, 59, 59, tzinfo=timezone.utc).timestamp()]
+    monkeypatch.setattr("vfs.gemini.time.time", lambda: now[0])
+    monkeypatch.setattr("vfs.gemini.time.sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+    first = GeminiGateway(cfg, tmp_path / "first")
+    second = GeminiGateway(cfg, tmp_path / "second")
+    ledger = tmp_path / "quota.json"
+    first._reserve_quota(ledger, "analysis-model", 90)
+    second._reserve_quota(ledger, "image-model", 90)
+    with pytest.raises(BudgetExceeded, match="daily request limit"):
+        second._reserve_quota(ledger, "analysis-model", 20)
+    now[0] += 1
+    midnight = now[0]
+    # The daily counter has reset. The rolling-minute token counter still applies.
+    second._reserve_quota(ledger, "analysis-model", 20)
+    assert now[0] == pytest.approx(midnight + 59)
