@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime
 import fcntl
 import hashlib
 import io
@@ -19,6 +20,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import cv2
 import numpy as np
@@ -188,6 +190,60 @@ class GeminiGateway:
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def _quota_lock(self):
+        """Serialize paid requests across output folders in this installation."""
+        quotas = self.config.get("quota")
+        if self.mock or not quotas:
+            yield None
+            return
+        path = Path(__file__).resolve().parents[1] / ".cache" / "gemini-quota.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            yield path
+
+    def _reserve_quota(self, path: Path, model: str, tokens: int) -> None:
+        quotas = self.config["quota"]
+        # Use the lower analysis limits for any unlisted image model override.
+        limits = quotas.get(model, quotas["fallback"])
+        rpm = min(self.rpm, limits["rpm"])
+        pacific = ZoneInfo("America/Los_Angeles")
+        try:
+            entries = json.loads(path.read_text()) if path.exists() else []
+            if not isinstance(entries, list):
+                raise ValueError
+            for entry in entries:
+                if (not isinstance(entry["model"], str) or
+                        not math.isfinite(entry["time"]) or
+                        type(entry["tokens"]) is not int or entry["tokens"] <= 0):
+                    raise ValueError
+        except (OSError, KeyError, TypeError, ValueError, OverflowError):
+            raise GeminiError("Shared Gemini quota ledger is unreadable") from None
+        if tokens > limits["tpm"]:
+            raise BudgetExceeded(f"Gemini input estimate exceeds local TPM limit for {model}")
+        while True:
+            now = time.time()
+            today = datetime.fromtimestamp(now, pacific).date()
+            entries = [entry for entry in entries if entry["time"] > now - 60 or
+                       datetime.fromtimestamp(entry["time"], pacific).date() >= today]
+            matching = [entry for entry in entries if entry["model"] == model]
+            if sum(datetime.fromtimestamp(entry["time"], pacific).date() == today
+                   for entry in matching) >= limits["rpd"]:
+                raise BudgetExceeded(f"Gemini local daily request limit reached for {model}")
+            recent = [entry for entry in matching if entry["time"] > now - 60]
+            wait = max((entry["time"] + 60 / rpm - now for entry in matching), default=0)
+            remaining = sum(entry["tokens"] for entry in recent)
+            for entry in sorted(recent, key=lambda item: item["time"]):
+                if remaining + tokens <= limits["tpm"]:
+                    break
+                remaining -= entry["tokens"]
+                wait = max(wait, entry["time"] + 60 - now)
+            if wait <= 0:
+                _atomic_json(path, [*entries, {"model": model, "time": now, "tokens": tokens}])
+                return
+            time.sleep(wait)
+
     def _read_ledger(self) -> dict:
         try:
             ledger = json.loads(self.ledger_path.read_text(encoding="utf-8"))
@@ -280,6 +336,12 @@ class GeminiGateway:
             return None
         return result
 
+    def _input_token_reserve(self, prompt: str, images: list, generation: dict) -> int:
+        schema = generation.get("response_json_schema")
+        schema_bytes = len(json.dumps(schema, ensure_ascii=False).encode("utf-8")) if schema else 0
+        return (len(prompt.encode("utf-8")) + len(_SYSTEM) + schema_bytes +
+                len(images) * int(self.config.get("image_input_token_reserve", 4096)))
+
     def _reserve_cost(self, kind: str, model: str, prompt: str, images: list,
                       generation: dict) -> float:
         if self.mock:
@@ -367,6 +429,8 @@ class GeminiGateway:
                  generation: dict, parse: Callable, mock_result: Callable) -> Any:
         if not self.enabled:
             raise GeminiUnavailable("Gemini is disabled")
+        if self.config.get("edit_only") and kind != "edit":
+            raise GeminiUnavailable("This workflow only permits image editing requests")
         if not model and not self.mock:
             raise GeminiUnavailable(f"Configure {'image_model' if kind == 'edit' else 'analysis_model'}")
         model = model or f"mock-{kind}"
@@ -380,7 +444,7 @@ class GeminiGateway:
         }
         key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
         cache = self.path / f"{key}.json"
-        with self._locked():
+        with self._locked(), self._quota_lock() as quota_path:
             ledger = self._read_ledger()
             if cache.exists():
                 try:
@@ -408,7 +472,10 @@ class GeminiGateway:
                 used = sum(item["reserved_usd"] for item in ledger["entries"])
                 if self.max_cost is not None and used + reservation > self.max_cost + 1e-9:
                     raise BudgetExceeded("Gemini monetary reservation budget reached")
-                if ledger["entries"] and not self.mock:
+                if quota_path is not None:
+                    tokens = self._input_token_reserve(prompt, images, generation)
+                    self._reserve_quota(quota_path, model, tokens)
+                elif ledger["entries"] and not self.mock:
                     wait = 60 / self.rpm - (time.time() - ledger["entries"][-1]["started_at"])
                     while wait > 0:
                         time.sleep(min(wait, 1.0))

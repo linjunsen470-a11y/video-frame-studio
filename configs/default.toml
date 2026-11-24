@@ -82,12 +82,13 @@ image_model = "gemini-nano-banana-2.1"
 max_calls = 40
 max_cost_usd = 2.0
 timeout_seconds = 90
-max_retries = 2
+max_retries = 0
 calls_per_minute = 10
 rank_batch_size = 6
 crop_padding = 48
 analysis_thinking_level = "minimal"
 image_thinking_level = "minimal"
+image_size = "1K" # Smallest Nano Banana 2.1 output; edits are composited at source resolution.
 reserve_analysis_usd = 0.03
 reserve_image_usd = 0.30
 
@@ -99,3 +100,15 @@ output_per_million = 1.50
 input_per_million = 1.50
 output_per_million = 7.50
 image_output_per_million = 30.00
+
+# Shared local reservations across output folders. Google quotas apply to the
+# provider project and can also be consumed by other clients.
+[gemini.quota."gemini-nano-banana-2.1"]
+rpm = 10
+tpm = 160000
+rpd = 800
+
+[gemini.quota.fallback]
+rpm = 5
+tpm = 80000
+rpd = 200

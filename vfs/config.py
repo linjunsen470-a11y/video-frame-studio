@@ -94,6 +94,14 @@ def validate_config(cfg: dict) -> None:
     for key in ("calls_per_minute", "timeout_seconds"):
         if cfg["gemini"][key] <= 0:
             raise ValueError(f"gemini.{key} must be positive")
+    quota = cfg["gemini"].get("quota")
+    if quota is not None:
+        if not isinstance(quota, dict) or "fallback" not in quota:
+            raise ValueError("gemini.quota requires a fallback entry")
+        for model, limits in quota.items():
+            if (not isinstance(limits, dict) or set(limits) != {"rpm", "tpm", "rpd"} or
+                    any(type(value) is not int or value <= 0 for value in limits.values())):
+                raise ValueError(f"gemini.quota.{model} requires positive integer rpm, tpm and rpd")
     if not 0 <= cfg["selection"]["semantic_weight"] <= 1:
         raise ValueError("semantic_weight must be between 0 and 1")
     for section, key in (("qc", "max_mask_fraction"), ("mask", "max_area_fraction"),

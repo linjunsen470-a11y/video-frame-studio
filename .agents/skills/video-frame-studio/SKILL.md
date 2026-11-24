@@ -1,6 +1,6 @@
 ---
 name: video-frame-studio
-description: Extract high-quality PNG stills from a video and remove subtitles using this repository's CPU CLI, cached OCR, conservative masks and optional Gemini analysis or local editing. Use when asked to process videos, resume a run, or audit frame exports; do not redesign the workflow.
+description: Extract high-quality PNG stills from a video and remove subtitles using this repository's CPU CLI, cached OCR, conservative masks and Gemini-only crop editing after Codex selects frames. Use when asked to process videos, resume a run, or audit frame exports; do not redesign the workflow.
 ---
 
 # Video Frame Studio
@@ -8,10 +8,13 @@ description: Extract high-quality PNG stills from a video and remove subtitles u
 Work from the repository root containing `pipeline.py`. Read `AGENTS.md` once.
 
 1. Initialize once: `bash setup.sh`; then `source .venv/bin/activate`.
-2. Use the requested count and budget:
-   `python pipeline.py --input INPUT --count N --output OUTPUT --budget-calls 40 --budget-usd 2`.
-3. Supply `GEMINI_API_KEY` through the environment or local `.env`. Never print it.
-   Without a key, explicitly choose `--offline`; use `--mock-gemini` only for simulated API testing.
+2. Run `python pipeline.py --prepare --input INPUT --output runs/JOB`. Read
+   the local sheets and original candidates. Apply the user's current prompt
+   to select exact frames and record timestamps and reasons.
+3. Run the same input/output with one `--select-frame ID` per chosen frame,
+   in priority order, and use the user's budget. Supply `GEMINI_API_KEY`
+   through the environment or local `.env`. Gemini edits only the local crop
+   and mask. Use Mock only for simulated testing.
 4. Resume an interrupted run with the same arguments plus `--resume`. Preserve
    the budget ledger; do not delete caches to evade a limit. Increase limits only
    within the user's authorized budget. Final failed quality attempts stay failed.
@@ -19,7 +22,7 @@ Work from the repository root containing `pipeline.py`. Read `AGENTS.md` once.
    meets the requested count; exit 2 is a quality shortfall; exit 1 is an error.
 6. Audit restored/existing output:
    `python pipeline.py --output OUTPUT --qc-only`. This calls no Gemini API.
-7. Deliver passed `images/*.png`, their originals/masks and the reports. Exclude
+7. Visually inspect each repaired area. Deliver passed `images/*.png`, their originals/masks and the reports. Exclude
    review previews from final results. State any shortfall and whether Gemini was
    real, disabled or mocked.
 
