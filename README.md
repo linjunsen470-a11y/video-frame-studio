@@ -7,6 +7,10 @@
 字幕是否全部检出、被遮挡背景是否真实、人物/产品是否自然，仍受 OCR、启发式和生成模型能力限制。
 不承诺规避任何平台的 AI 内容检测、SynthID 或标注机制。
 
+## 餐饮实拍图集
+
+已有照片可以直接用 `python -m catering_visual` 生产下游图集。支持 JSON 设计、6 个餐饮预设、3 套风格、中文文字检查和单页重渲染。该入口独立于视频处理，全程本地运行。使用方法见 [餐饮图集指南](docs/CATERING-GALLERY.md)，选型依据见 [渲染方案对比](docs/CATERING-RENDERER-RESEARCH.md)。
+
 ## 快速开始
 
 需要 Python **3.12+**、Linux x86-64、FFmpeg/ffprobe。实际验证环境为 Python 3.12 / CPU。
