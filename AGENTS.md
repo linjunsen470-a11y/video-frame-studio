@@ -1,6 +1,10 @@
 # Video Frame Studio — execution contract
 
-Use the existing CLI. Do not plan a new workflow for each video.
+Use the existing CLI for extracting or repairing video frames. Do not plan a new workflow for each video.
+
+For Xiaohongshu editorial work using prepared photos or passed frame exports, use
+[xiaohongshu-catering-editorial](.agents/skills/xiaohongshu-catering-editorial/SKILL.md).
+Start that workflow from the supplied images. Run the frame pipeline when the task also needs frame preparation.
 
 1. Initialize once with `bash setup.sh`; activate `.venv`.
 2. Read only the relevant README command and config. Never read/print `.env`.

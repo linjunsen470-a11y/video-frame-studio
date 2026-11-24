@@ -7,6 +7,18 @@
 字幕是否全部检出、被遮挡背景是否真实、人物/产品是否自然，仍受 OCR、启发式和生成模型能力限制。
 不承诺规避任何平台的 AI 内容检测、SynthID 或标注机制。
 
+## 小红书团餐图文
+
+在 Codex Cloud 打开这个仓库后，用 `$xiaohongshu-catering-editorial` 调用
+[团餐图文技能](.agents/skills/xiaohongshu-catering-editorial/SKILL.md)。提供实拍照片、通过质检的抽帧目录或现有图集，说明这次要做食堂承包、员工餐配送或后厨记录。技能可输出排好的图集和发布文案，也可按要求只改其中一项。
+
+```text
+$xiaohongshu-catering-editorial 用我附的饭堂菜盘和餐线照片做一篇现场记录。
+挑封面、排图，写一版可以直接发的小红书文案。
+```
+
+图文工作从已有照片开始。云端已配置小红书站内访问时可补查原帖，其余环境可直接用仓库内的研究附录。私有原图、待发文案和渲染成品放在 `runs/` 或本地 `catering-xhs/`，两个目录都已忽略。
+
 ## 快速开始
 
 需要 Python **3.12+**、Linux x86-64、FFmpeg/ffprobe。实际验证环境为 Python 3.12 / CPU。
