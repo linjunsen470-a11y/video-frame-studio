@@ -22,8 +22,12 @@ artifacts/
 *.zip
 .DS_Store
 
-# Local frame-selection jobs, review sheets, reports, and usage ledgers.
+# Local jobs, partner photos, design JSON, unpublished captions, and renders.
 /runs/
+/catering-xhs/
+
+# Workflow state and generated selection previews.
+.gallery.lock
 .vfs.lock
 .checkpoint.json
 **/selection/index.json

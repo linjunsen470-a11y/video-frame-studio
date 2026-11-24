@@ -7,9 +7,23 @@
 字幕是否全部检出、被遮挡背景是否真实、人物/产品是否自然，仍受 OCR、启发式和生成模型能力限制。
 不承诺规避任何平台的 AI 内容检测、SynthID 或标注机制。
 
-## 餐饮实拍图集
+## 小红书团餐图文与实拍图集
 
-已有照片可以直接用 `python -m catering_visual` 生产下游图集。支持 JSON 设计、6 个餐饮预设、3 套风格、中文文字检查和单页重渲染。该入口独立于视频处理，全程本地运行。使用方法见 [餐饮图集指南](docs/CATERING-GALLERY.md)，选型依据见 [渲染方案对比](docs/CATERING-RENDERER-RESEARCH.md)。
+用 `$xiaohongshu-catering-editorial` 调用
+[团餐图文技能](.agents/skills/xiaohongshu-catering-editorial/SKILL.md)。提供实拍照片、通过质检的抽帧或现有图集，
+说明要做食堂承包、员工餐配送或后厨记录。Codex 按本次需求挑封面、排图和写发布文案，也可以只改其中一项。
+
+```text
+$xiaohongshu-catering-editorial 用我附的饭堂菜盘和餐线照片做一篇现场记录。
+挑封面、排图，写一版可以直接发的小红书文案。
+```
+
+需要生成成品时，用 `python -m catering_visual` 将选好的照片和文案写成 JSON 设计，再批量渲染和审计。
+工具支持 6 个餐饮预设、3 套风格、中文文字检查及单页重渲染，全程本地运行。
+查看 [餐饮图集指南](docs/CATERING-GALLERY.md) 和 [渲染方案对比](docs/CATERING-RENDERER-RESEARCH.md)。
+
+云端已配置小红书站内访问时可补查原帖，也可参考技能附带的研究记录。
+私有原图、待发文案、设计 JSON 和成品放在根目录的 `runs/` 或 `catering-xhs/` 下，这两个目录均已忽略。
 
 ## 快速开始
 

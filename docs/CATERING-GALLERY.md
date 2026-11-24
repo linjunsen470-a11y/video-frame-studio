@@ -2,16 +2,20 @@
 
 从已准备好的 JPEG、PNG、WebP 静态素材开始。Agent 查看照片，按本次目标分类、选择、分组和填写业务已确认的文案。程序在 CPU 上逐页渲染 PNG，保留每页的来源哈希和照片区域坐标。
 
+小红书团餐项目可先用 [团餐图文技能](../.agents/skills/xiaohongshu-catering-editorial/SKILL.md) 确定首图、翻图顺序和发布文案，再把选好的照片和文字写入图集设计。
+
 ## 安装
 
 在仓库根目录运行。现有 `.venv` 已安装 Pillow，可直接复用。单独运行图集只需 Python 3.12、仓库锁定的 Pillow 版本和字体。Debian/Ubuntu 上可安装 `fontconfig` 与 `fonts-noto-cjk`。无需 API Key。
 
 ## 从素材到图集
 
-```bash
-python -m catering_visual analyze ./photos --out runs/catering/inventory.json
+例如，把私有原图放在 `runs/catering/photos/`。原图、设计、待发文案和生成文件均留在已忽略的 `runs/` 或 `catering-xhs/` 下。
 
-python -m catering_visual plan ./photos --out runs/catering/design.json \
+```bash
+python -m catering_visual analyze runs/catering/photos --out runs/catering/inventory.json
+
+python -m catering_visual plan runs/catering/photos --out runs/catering/design.json \
   --style editorial \
   --page canteen-hero hall.jpg \
   --page hero-1plus3 line.jpg dish-1.jpg dish-2.jpg dish-3.jpg
@@ -54,7 +58,7 @@ python -m catering_visual inspect runs/catering/gallery --plan runs/catering/des
 ```json
 {
   "version": 1,
-  "asset_root": "../../photos",
+  "asset_root": "photos",
   "canvas": {"width": 1080, "height": 1440},
   "style": "real-photo",
   "pages": [
