@@ -1,0 +1,9 @@
+# Direct runtime dependencies. setup.sh uses the fully pinned requirements.lock.
+# Python >=3.12. Do NOT add opencv-python alongside opencv-python-headless.
+numpy==2.5.5
+opencv-python-headless==4.14.0.94
+Pillow==13.0.0
+rapidocr==3.10.0
+onnxruntime==1.32.0
+google-genai==2.34.0
+scenedetect==0.6.7

@@ -1,0 +1,15 @@
+# Known synthetic scene labels are kept. This is a test fixture policy, not a
+# claim that arbitrary real-world scene text is always classified correctly.
+[ocr]
+mode = "auto"
+keep_words = ["BRAND", "原味", "真实招牌", "SHOP", "真实商店"]
+
+[video]
+candidates = 16
+sample_seconds = 0.5
+
+[selection]
+phash_distance = 3
+
+[gemini]
+enabled = false
