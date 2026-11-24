@@ -28,3 +28,6 @@ artifacts/
 .checkpoint.json
 **/selection/index.json
 **/selection/sheet-*.png
+
+# Local Xiaohongshu galleries, partner photos, and unpublished captions.
+/catering-xhs/
