@@ -7,9 +7,8 @@
 | 部分 | 项目采用 | 依据与边界 |
 | --- | --- | --- |
 | SDK | 官方 `google-genai`，已在 CPU Python 环境验证 2.34.0 的请求类型 | SDK 为 Apache-2.0；依赖许可不等同于云服务条款。没有引入 Agent 框架。 |
-| 常规分析 | 配置默认 `gemini-3.1-flash-lite`；可通过环境变量替换 | 图像理解、结构化评分、OCR 区域语义分类和局部质检；仅提交传统算法筛选后的少量图片。更近的 `gemini-3.5-flash-lite` 可另行配置价格与模型，不自动升级。 |
-| 困难修复 | 配置默认 `gemini-nano-banana-2.1` | 官方当前推荐的高效率图像编辑模型，支持多参考图。`gemini-3.1-flash-lite-image` 可作为低成本选项，但其官方说明不以多参考图一致性为主要优势。 |
-| 原生 Mask | 不假设存在精确 Mask 请求参数 | 官方的语义 inpainting 通过提示描述修改位置；项目把 OCR mask 当作普通参考图片，输出始终只是裁剪区域修复提案。 |
+| 整帧编辑 | 配置默认 `gemini-nano-banana-2.1` | 官方当前推荐的高效率图像编辑模型，支持多参考图。`gemini-3.1-flash-lite-image` 可作为低成本选项，但其官方说明不以多参考图一致性为主要优势。 |
+| 原生 Mask | 不假设存在精确 Mask 请求参数 | 官方的语义 inpainting 通过提示描述修改位置；项目把 OCR mask 当作普通参考图片，输出为整帧修复提案。 |
 | 最终像素保护 | 由本地 mask 合成和 PNG 差分完成 | 这是确定性代码属性，不能靠模型提示保证；不承诺恢复被遮挡内容的真实原貌，也不承诺规避 AI 内容标识。 |
 
 官方来源：[SDK 与调用示例](https://github.com/googleapis/python-genai)、[SDK 许可证](https://github.com/googleapis/python-genai/blob/main/LICENSE)、[结构化输出](https://aistudio.google.com/docs/structured-output)、[图像理解](https://aistudio.google.com/docs/image-understanding)、[图像生成和编辑](https://aistudio.google.com/docs/image-generation)、[Nano Banana 2.1 模型卡](https://aistudio.google.com/docs/models/gemini-nano-banana-2.1)、[Flash-Lite 3.5 模型卡](https://aistudio.google.com/docs/models/gemini-3.5-flash-lite)。
@@ -20,8 +19,6 @@
 
 | 模型 | 输入 | 文本和思考输出 | 图像输出 |
 | --- | ---: | ---: | ---: |
-| `gemini-3.1-flash-lite` | 0.25 | 1.50 | 不适用 |
-| `gemini-3.5-flash-lite` | 0.30 | 2.50 | 不适用 |
 | `gemini-nano-banana-2.1` | 1.50 | 7.50 | 30.00 |
 | `gemini-3.1-flash-lite-image` | 0.25 | 1.50 | 30.00 |
 
@@ -31,16 +28,12 @@
 
 API 超时采用 SDK 的毫秒参数；包装层对临时网络错误、限流及服务端错误退避重试，对认证等确定性失败直接停止。错误日志不写 API Key、完整请求或供应商响应正文。SDK 依据：[重试实现](https://github.com/googleapis/python-genai/blob/main/google/genai/_api_client.py)、[SDK 文档](https://googleapis.github.io/python-genai/)。
 
-推荐配置 `analysis_thinking_level: "minimal"` 与 `image_thinking_level: "minimal"`。当前所选模型支持此设置；更换模型时按其文档调整或删除该配置。Nano Banana 2.1 默认 medium 思考，使用 minimal 可减少简单局部擦字的思考消耗，但不能保证每次都在输出 token 限额内完成。来源：[图像思考级别](https://aistudio.google.com/docs/image-generation#thinking-levels)、[思考参数](https://aistudio.google.com/docs/thinking)。
+默认使用 `image_thinking_level = "minimal"`。当前所选模型支持此设置；更换模型时按其文档调整或删除该配置。Nano Banana 2.1 默认 medium 思考，使用 minimal 可减少简单局部擦字的思考消耗，但不能保证每次都在输出 token 限额内完成。来源：[图像思考级别](https://aistudio.google.com/docs/image-generation#thinking-levels)、[思考参数](https://aistudio.google.com/docs/thinking)。
 
-## 局部编辑与语义分类
+## 整帧编辑与局部合成
 
-按 Mask 连通域合并相邻字幕，再扩出有限上下文。裁剪图补成方形，提交原裁剪和黑白参考 Mask；请求 1K 方形输出。返回尺寸先做安全检查，宽高比偏离方形超过 3% 则拒绝，合法提案再缩放回原裁剪尺寸。无论 API 返回什么，最终交付必须经过本地掩码合成、原分辨率 PNG 保存及非 Mask 区域逐像素验证。
+每轮提交完整帧和对齐的黑白蒙版，蒙版包含本帧所有确认的目标。回图按原比例映射，再用蒙版外场景做有界配准。只替换合成掩码内的像素，保存原尺寸 PNG 并逐像素检查掩码外一致性。
 
-`classify_regions()` 仅协助判断 OCR 已检出的文字是否后期叠加。模型只能返回输入区域索引、类别和置信度；所有模型生成坐标均被忽略。模糊文字来源仍须保留为待复核，不能把单帧视觉判断当作确定事实。
+## 验证范围
 
-## 已验证与尚未验证
-
-`tests/test_gemini.py` 使用真实 SDK 2.34.0 的请求类型和离线响应替身，覆盖缓存与恢复、call/美元预算、失败重试、缺 Key、结构化输出、错误脱敏、并发预算、裁剪、异常宽高比、视觉质检阈值和文字分类。Mock 修复仅执行 OpenCV inpaint，用于验证接口编排；Mock 评分、语义分类和视觉复核均明确带 `mock` 字段，不代表模型质量。
-
-**开发环境没有 Gemini API Key，未向 Google 发起真实付费请求。** 账户模型可用性、实际延迟、实际账单、复杂素材上的编辑保真和视觉判断质量尚待真实 API 验证。格式校验和离线测试不能替代这些验证。
+SDK 测试覆盖图像返回校验、断点续跑、API 预算、缓存与重试、错误脱敏、并发、整帧双区域提交、异常宽高比和画面配准。Mock 仅用于无网络测试。实际验证范围与限制见 [验证记录](VALIDATION.md)。

@@ -24,9 +24,9 @@ $xiaohongshu-catering-editorial 用我附的饭堂菜盘和餐线照片做一篇
 挑封面、排图，写一版可以直接发的小红书文案。
 ```
 
-需要生成成品时，用 `python -m catering_visual` 将选好的照片和文案写成 JSON 设计，再批量渲染和审计。
-工具支持 6 个餐饮预设、3 套风格、中文文字检查及单页重渲染，全程本地运行。
-查看 [餐饮图集指南](docs/CATERING-GALLERY.md) 和 [渲染方案对比](docs/CATERING-RENDERER-RESEARCH.md)。
+需要生成成品时，用 `python -m catering_visual` 将选好的照片和文案写成 JSON 设计，再生成 3:4 JPEG，按单张 300 KB 目标审计，并输出笔记文案。
+图集支持竖向单图和横向双帧上下拼接、单页重渲染及文案审计。文案默认 80–150 字，广州业务在标题和话题写明城市。
+查看 [餐饮图集指南](docs/CATERING-GALLERY.md)。
 
 云端已配置小红书站内访问时可补查原帖，也可参考技能附带的研究记录。
 私有原图、待发文案、设计 JSON 和成品放在根目录的 `runs/` 或 `catering-xhs/` 下，这两个目录均已忽略。
@@ -49,7 +49,7 @@ cp .env.example .env
 GEMINI_API_KEY=your_key_here
 ```
 
-或通过 Codex 环境的 secret / 环境变量注入 `GEMINI_API_KEY`，不用创建 `.env`。
+也可通过 Codex 的环境变量注入 `GEMINI_API_KEY`。
 不要把 Key 写入命令参数、聊天记录、配置仓库或日志。程序只读取它，不输出它。
 
 ### 1. 本地准备候选
@@ -73,10 +73,10 @@ python pipeline.py --input video.mp4 --output runs/job-001 \
 ```
 
 把示例 ID 换成候选索引中的实际 ID，按交付优先级排列。程序核对视频指纹、候选原图和帧 ID，
-处理数量由选中的 ID 决定。帧不通过时记录缺额。没有目标字幕的帧不会计为去字成品。
+处理数量由选中的 ID 决定。帧不通过时记录缺额。经逐帧核对确认没有目标叠字时，可用空区域列表导出原帧。
 
 RapidOCR 在本地定位文字。程序用邻帧、字幕位置和保护区判断目标文字，文字来源不确定则进入待审核。
-Gemini 只收到选定帧的局部裁剪及遮罩参考图，只负责重绘。选帧、文字判定、视觉复核都由本地流程或 Codex 处理。
+每轮向 Gemini 提交完整选定帧和一张合并所有目标框的蒙版。选帧、文字判定、对齐和视觉复核由本地流程或 Codex 处理。
 此入口的实际修复只用 Gemini。程序在遮罩内合成候选结果，重读 PNG 检查尺寸、遮罩外像素、OCR 残留、
 疑似笔画、清晰度、融合边缘及重复图。交付前由 Codex 目视核对字幕区域、主体和背景边缘。
 
@@ -90,8 +90,7 @@ python pipeline.py --output runs/job-001 --qc-only
 两个阶段各接收一个视频，`--input` 支持本地文件或可直接下载的 HTTP(S) 视频。
 登录页、HLS/DASH 播放列表和私网地址不可用。下载受大小和超时限制。
 
-`--offline` 和 `--mock-gemini` 仍可用于隔离的本地验证及接口测试。带 `--select-frame` 时可用 Mock 测试选帧到改绘的边界。
-生产流程按上述两个阶段执行。
+`--mock-gemini` 用于显式选帧的无网络测试。正式编辑使用 Gemini。
 
 ## 字幕模式与真实文字保护
 
@@ -133,9 +132,20 @@ protect_regions = [[500, 100, 650, 180]]
 手工模式也支持 `manual_regions = [[[x0,y0],[x1,y0],[x1,y1],[x0,y1]]]` 多边形。
 所有模式仍启用真实 OCR 复核。没有 OCR 依赖或识别失败时不会把图片判为“无字幕”。
 
+小红书的定稿选帧使用 `[ocr.reviewed_frames]`。为每个 `--select-frame` ID 提供一项，用原始像素框标记所有经 OCR 和目视确认的字幕或独立「广告」标记。OCR 漏检时补上目视确认的框。显式空列表代表确认无目标叠字，可直接进行无损质检。
+
+```toml
+[ocr.reviewed_frames]
+f00000240 = [
+  {kind = "ad_label", text = "广告", box = [72, 138, 160, 185]},
+  {kind = "subtitle", text = "看着香吗？", box = [247, 975, 462, 1031]},
+]
+f00000255 = []
+```
+
 ## Gemini 模型、费用和失败处理
 
-选帧工作流使用 `configs/default.toml` 中的 `gemini-nano-banana-2.1`，默认输出 1K 裁剪图，
+选帧工作流使用 `configs/default.toml` 中的 `gemini-nano-banana-2.1`，默认返回 1K 整帧提案，
 最终 PNG 采用原帧分辨率。`GEMINI_IMAGE_MODEL` 可覆盖图像模型。价格和接口限制见 `docs/research-gemini.md`。
 
 - `max_calls` 是所有实际请求尝试的硬上限，包括失败与重试。
@@ -149,22 +159,7 @@ protect_regions = [[500, 100, 650, 180]]
   额度账本在本仓库各输出目录间共享。预算或网络故障保存为可恢复状态，可在问题解除后 `--resume`。
 - Mock 与真实请求使用隔离账本和缓存；报告不会把 Mock 次数计作真实 API。
 
-原生 Gemini 编辑不是精确像素 Mask API。本项目发送局部原图及区域提示，返回仅作 proposal；
-最终由 NumPy/OpenCV 合成。原尺寸不匹配且无法可靠映射的返回会被拒绝，不会直接覆盖整帧。
-
-## 可选 ONNX 修复
-
-默认不带 LaMa/Torch。只有提供模型路径才尝试 Level 3：
-
-```toml
-[repair]
-onnx_model = "/absolute/path/to/licensed-model.onnx"
-```
-
-支持限定协议：图像 RGB NCHW float32 `[0,1]`、单通道 NCHW Mask `[0,1]`，输出 RGB NCHW `[0,1]`；
-输入名称/形状必须符合适配器要求，详见 `vfs/repair.py`。模型可为固定/动态大小，按适配器做局部尺度调整。
-不保证任意 LaMa 导出都兼容。**真实 LaMa 权重未实测**，只验证了适配接口和异常降级；权重授权由提供者确认。
-生成式 ONNX 修复默认还要求 Gemini 视觉复核，因此完全离线时可能进入 review。
+Gemini 蒙版作为编辑参考。返回图经宽高比和场景配准验证后，由 NumPy/OpenCV 只把目标蒙版内的像素合回原图。无法可靠对齐的提案进入审核。
 
 ## 输出、缓存与退出状态
 
@@ -172,8 +167,7 @@ onnx_model = "/absolute/path/to/licensed-model.onnx"
 `masks` 为二值最终修改支持区，包含羽化范围。`originals` 和通过图对应，不能为节省空间删掉后仍宣称可复核。
 
 额外 `.checkpoint.json`、`.cache/ocr/`、`.cache/gemini/` 用于续跑和计费缓存；输出目录不会提交到 GitHub。
-选帧工作流保留候选索引、联系表和原始帧缓存，以便对照与续跑。离线验证完成后默认清理扫描缓存。
-可恢复 API 故障暂时保留候选缓存，供下次续跑。`--keep-intermediates` 可保留完整候选。
+选帧工作流保留候选索引、联系表和原始帧缓存。历史运行可以用 `--qc-only` 审计。旧配置里的 `[repair]` 和旧自动修复入口已经移除。
 
 首次扫描中途断开时会重新做该次顺序扫描；完成扫描后的中断复用候选，不重复解码。
 已完成任务续跑只复核已有结果。质检淘汰的图片不会因为重复执行而无限重试。
@@ -187,7 +181,7 @@ onnx_model = "/absolute/path/to/licensed-model.onnx"
 | 1 | 配置、输入、依赖、OCR 或运行错误 |
 | 130 | 用户中断；可使用 `--resume` |
 
-默认 2 个 CPU 线程、最多 4 个同镜头 donor、顺序 API 调用；内存不会随视频帧数线性增长。
+默认 2 个 CPU 线程，顺序调用 API。邻帧只为本地 OCR 提供时序证据。
 候选缓存默认硬限制 1536 MiB；高分辨率视频可减少候选或显式增加限额。
 当前仅支持 SDR 8-bit 视频。HDR/>8-bit 输入会拒绝，避免把转成 BGR8 误称为保留原始色深。
 输出采用编码像素方向，手机旋转元数据不自动应用；可先明确旋转转码，再将转码视频作为像素基准。
@@ -199,14 +193,13 @@ bash setup.sh --dev
 source .venv/bin/activate
 python -m pytest -q
 python scripts/smoke_test.py --workdir /tmp/vfs-smoke-new
-python scripts/smoke_test.py --workdir /tmp/vfs-smoke-mock-new --mock-gemini
 python -m pip_audit
 ```
 
 Smoke 测试自行生成视频，不下载第三方素材；中英文示例需要系统 Noto CJK 字体，Debian/Ubuntu 可安装
 `fonts-noto-cjk`。普通处理不需要这个字体。测试目录必须不存在，以免覆盖既有证据。
 
-测试覆盖真实 CPU OCR、细 Mask、缺首/尾字回归、邻帧恢复/污染拒绝、100% 掩码外保护、PNG 审计、
+测试覆盖真实 CPU OCR、细 Mask、缺首/尾字回归、Gemini 整帧请求与配准、100% 掩码外保护、PNG 审计、
 异常 OCR、重复帧、预算/缓存/重试、单次解码、断点续跑、危险输入限制，以及真实视频端到端流程。
 实测结果及未实测范围见 `docs/VALIDATION.md`。
 
@@ -221,20 +214,11 @@ Smoke 测试自行生成视频，不下载第三方素材；中英文示例需�
 已研究用户指定的字幕擦除、精彩帧、OCR、inpainting、Crop-and-Stitch 项目，比较与来源见 `docs/RESEARCH.md`。
 复用成熟依赖 API 与算法思想，没有复制 GPL 项目源码，也没有把庞大项目直接嵌入 CLI。
 
-源码包不包含视频、真实 Key、模型权重、虚拟环境、字体或大型二进制。
-首次在 GitHub 建库可在网站创建私有空仓库后上传，或在已认证的 `gh` 环境执行：
-
-```bash
-git init
-git add .
-git commit -m "Initial Video Frame Studio implementation"
-gh repo create video-frame-studio --private --source=. --remote=origin --push
-```
+源视频、密钥、模型、缓存和交付产物应留在本地忽略目录。
 
 ## 已知边界
 
 固定不变字幕、极小字、艺术字、低对比度、透明花字可能漏检；整行没被 OCR 检出不能靠边缘扩展补全。
 时序变化也不是严格的字幕证明：画面中电子屏幕或内容变化的包装可能需要保护区。
-邻帧必须真的露出背景、配准可信且无文字污染；持续覆盖同一区域的字幕无法凭空恢复真实背景。
 生成式修复与视觉复核存在误判，严格像素约束只保证掩码外，不能保证掩码内事实正确。
-本次只验证了自制视频和合成图，不把它外推为任意真实影片的成功率或速度保证。
+验证范围与限制见 [验证记录](docs/VALIDATION.md)。

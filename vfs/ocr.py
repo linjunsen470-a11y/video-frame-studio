@@ -267,3 +267,25 @@ def select_regions(regions: list[dict], image_shape: tuple, config: dict,
         else:
             groups["uncertain"].append({**region, "reason": "overlay_or_scene_text_ambiguous"})
     return groups
+
+
+def reviewed_overlay_regions(regions, image_shape, config, reviewed):
+    """Convert visually confirmed source-pixel boxes to the normal mask input."""
+    height, width = image_shape[:2]
+    boxes = [entry["box"] for entry in reviewed]
+    if any(not (0 <= x0 < x1 < width and 0 <= y0 < y1 < height)
+           for x0, y0, x1, y1 in boxes):
+        raise ValueError("Reviewed overlay box is outside the source frame")
+    groups = select_regions(regions, image_shape, {**config, "mode": "auto"})
+    manual = select_regions([], image_shape, {**config, "mode": "manual", "manual_regions": boxes})
+    if len(manual["selected"]) != len(reviewed) or any(
+            _overlap(_bounds(protected), tuple(box)) > 0
+            for protected in groups["protected"] for box in boxes):
+        raise ValueError("Reviewed overlay overlaps protected text or has an invalid box")
+    groups["selected"] = [
+        {**region, "reason": f"reviewed_{entry['kind']}", "text": entry.get("text", "")}
+        for region, entry in zip(manual["selected"], reviewed, strict=True)
+    ]
+    # The operator reviewed the whole frame and supplied all target overlays.
+    groups["uncertain"] = []
+    return groups

@@ -3,7 +3,6 @@
 [run]
 count = 20
 max_attempts = 3
-keep_intermediates = false
 threads = 2
 previews = true
 
@@ -29,7 +28,6 @@ max_dark_fraction = 0.85
 max_bright_fraction = 0.85
 min_gray_std = 8.0
 phash_distance = 5
-semantic_weight = 0.65
 
 [ocr]
 backend = "rapidocr"
@@ -54,15 +52,6 @@ min_stroke_coverage = 0.015
 max_area_fraction = 0.20
 feather_px = 2
 
-[repair]
-radius = 3
-temporal = true
-onnx_model = "" # Optional external LaMa-compatible ONNX; never silently downloaded.
-simple_edge_density = 0.12
-simple_gray_std = 45.0
-allow_complex_cv = false
-gemini_fallback = true
-
 [qc]
 min_sharpness = 6.0
 min_sharpness_ratio = 0.55
@@ -71,30 +60,19 @@ max_seam_excess = 60.0
 residual_overlap = 0.08
 max_persistent_stroke_pixels = 16
 require_no_uncertain_text = true
-review_ai_edits = true
 
 [gemini]
-enabled = true
 mock = false
 api_key_env = "GEMINI_API_KEY"
-analysis_model = "gemini-3.1-flash-lite"
 image_model = "gemini-nano-banana-2.1"
 max_calls = 40
 max_cost_usd = 2.0
 timeout_seconds = 90
 max_retries = 0
 calls_per_minute = 10
-rank_batch_size = 6
-crop_padding = 48
-analysis_thinking_level = "minimal"
 image_thinking_level = "minimal"
 image_size = "1K" # Smallest Nano Banana 2.1 output; edits are composited at source resolution.
-reserve_analysis_usd = 0.03
 reserve_image_usd = 0.30
-
-[gemini.prices."gemini-3.1-flash-lite"]
-input_per_million = 0.25
-output_per_million = 1.50
 
 [gemini.prices."gemini-nano-banana-2.1"]
 input_per_million = 1.50

@@ -8,8 +8,6 @@ import sys
 
 from vfs.runtime import cloud_startup_allowed
 
-from .presets import PRESETS, STYLES
-
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Prepare, render and inspect photo galleries in Codex Cloud")
@@ -20,14 +18,14 @@ def main(argv=None):
     plan = modes.add_parser("plan", help="Write a design from explicitly chosen page groups")
     plan.add_argument("input", type=Path)
     plan.add_argument("--out", required=True, type=Path)
-    plan.add_argument("--style", choices=STYLES, default="real-photo")
-    plan.add_argument("--page", nargs="+", action="append", required=True, metavar=("PRESET", "PHOTO"),
-                      help="Repeat with one preset followed by its photo paths, in visual order")
+    plan.add_argument("--copy", type=Path, required=True, help="JSON with title, body and tags")
+    plan.add_argument("--page", nargs="+", action="append", required=True, metavar="PHOTO",
+                      help="Repeat with one portrait or two landscape photos in visual order")
     render = modes.add_parser("render", help="Render all pages or repeat --page for a subset")
     render.add_argument("plan", type=Path)
     render.add_argument("--out", required=True, type=Path)
     render.add_argument("--page", action="append", metavar="ID")
-    inspect = modes.add_parser("inspect", help="Audit PNGs and optionally check the current design and inputs")
+    inspect = modes.add_parser("inspect", help="Audit JPEGs and post copy and optionally check the current design and inputs")
     inspect.add_argument("output", type=Path)
     inspect.add_argument("--plan", type=Path)
     args = parser.parse_args(argv)
@@ -38,7 +36,7 @@ def main(argv=None):
 
     try:
         from .design import asset_path, inventory, load_plan, validate_plan
-        from .render import inspect_gallery, render_gallery, write_json
+        from .render import inspect_gallery, render_gallery, render_page, write_json
 
         if args.command in {"analyze", "plan"} and args.out and args.out.suffix.lower() != ".json":
             raise ValueError("--out must be a .json file for analyze and plan")
@@ -50,17 +48,18 @@ def main(argv=None):
             return 0 if result["assets"] and not result["errors"] else 2
         if args.command == "plan":
             root = args.input.resolve()
-            pages = []
-            for i, (preset, *photos) in enumerate(args.page, 1):
-                if preset not in PRESETS:
-                    raise ValueError(f"Unknown preset {preset}. Choices: {', '.join(PRESETS)}")
-                for name in photos:
-                    asset_path(root, name)
-                pages.append({"id": f"page-{i:02d}", "preset": preset,
-                              "photos": [{"src": name} for name in photos]})
-            value = {"version": 1, "asset_root": os.path.relpath(root, args.out.resolve().parent),
-                     "style": args.style, "canvas": {"width": 1080, "height": 1440}, "pages": pages}
-            write_json(args.out, validate_plan(value))
+            pages = [{"id": f"page-{i:02d}", "photos": photos}
+                     for i, photos in enumerate(args.page, 1)]
+            if args.out.resolve() == args.copy.resolve():
+                raise ValueError("Plan output would overwrite the copy input")
+            value = {"version": 2, "asset_root": os.path.relpath(root, args.out.resolve().parent),
+                     "copy": json.loads(args.copy.read_text(encoding="utf-8")), "pages": pages}
+            validate_plan(value)
+            for page in pages:
+                if any(asset_path(root, name) == args.out.resolve() for name in page["photos"]):
+                    raise ValueError("Plan output would overwrite a source photo")
+                render_page(page, root)
+            write_json(args.out, value)
             print(args.out)
             return 0
         path = args.plan.resolve() if args.plan else None

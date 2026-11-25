@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from vfs.config import load_config
-from vfs.gemini import BudgetExceeded, GeminiGateway
+from vfs.gemini import GeminiGateway
 from vfs.ocr import OCRDetector, OCRUnavailable
 from vfs import pipeline
 from vfs.quality import metrics
@@ -20,16 +20,14 @@ from vfs.util import read_image, read_json, write_png
 
 @pytest.fixture
 def config(monkeypatch):
-    monkeypatch.delenv("GEMINI_ANALYSIS_MODEL", raising=False)
     monkeypatch.delenv("GEMINI_IMAGE_MODEL", raising=False)
     cfg = load_config()
-    cfg["run"].update(count=1, previews=False, keep_intermediates=True)
+    cfg["run"].update(count=1, previews=False)
     cfg["ocr"].update(mode="all", backend="mock")
     cfg["mask"]["type"] = "polygon"  # mask extraction quality has separate real-image tests
-    cfg["repair"].update(simple_edge_density=-1, temporal=False, onnx_model="")
     # This test suite isolates orchestration/pixel protection, not quality tuning.
     cfg["qc"].update(min_sharpness=0, min_sharpness_ratio=0, max_seam_excess=999)
-    cfg["gemini"].update(mock=True, enabled=True, calls_per_minute=1e9)
+    cfg["gemini"].update(mock=True, calls_per_minute=1e9)
     return cfg
 
 
@@ -73,15 +71,12 @@ class ReferenceDetector:
 
 class WholeFrameProposal:
     """A deliberately overreaching API proposal must remain confined by masks."""
-    enabled = True
     mock = True
     last_edit_info = {"mock": True, "proposal_only": True}
 
-    def edit_crop(self, image, mask, attempt=0):
+    def edit_frame(self, image, mask, attempt=0):
         return 255 - image
 
-    def review_edit(self, original, edited, mask):
-        return {"passed": True, "mock": True, "confidence": 0, "issues": []}
 
 
 def test_whole_frame_mock_proposal_cannot_escape_mask_or_protection(tmp_path, config, monkeypatch):
@@ -110,7 +105,6 @@ def test_whole_frame_mock_proposal_cannot_escape_mask_or_protection(tmp_path, co
     assert np.array_equal(edited[110:148, 118:123], original[110:148, 118:123])
     assert result["qc"]["outside_changed_pixels"] == 0
     assert result["qc"]["outside_pixel_equality"] == 1.0
-    assert result["qc"]["visual_review"]["mock"] is True
 
 
 def test_disabled_ocr_never_promotes_an_image(tmp_path, config):
@@ -122,7 +116,7 @@ def test_disabled_ocr_never_promotes_an_image(tmp_path, config):
     assert not list((tmp_path / "images").glob("*.png"))
 
 
-def test_output_ocr_failure_cannot_be_overridden_by_visual_pass(tmp_path, config):
+def test_output_ocr_failure_blocks_export(tmp_path, config):
     original = synthetic()
     item = candidate(tmp_path, original)
     detector = ReferenceDetector([original], fail_on_output=True)
@@ -141,7 +135,6 @@ def test_output_ocr_failure_cannot_be_overridden_by_visual_pass(tmp_path, config
 def test_incomplete_ocr_response_is_not_a_clean_frame(tmp_path, config, bad_result):
     original = synthetic()
     item = candidate(tmp_path, original)
-    config["gemini"]["enabled"] = False
     detector = OCRDetector(tmp_path / "ocr", {"backend": "rapidocr"})
     detector.api = "modern"
     detector.engine = lambda image: bad_result
@@ -149,35 +142,6 @@ def test_incomplete_ocr_response_is_not_a_clean_frame(tmp_path, config, bad_resu
     with pytest.raises(OCRUnavailable):
         pipeline._candidate(item, tmp_path, config, detector, gateway, [])
     assert not list((tmp_path / "images").glob("*.png"))
-
-
-def test_semantic_indices_map_to_original_ocr_geometry():
-    regions = [region(text="caption"), region(20, 20, 60, 40, "brand"),
-               region(170, 90, 230, 110, "ambiguous")]
-    groups = {"selected": [], "protected": [], "uncertain": deepcopy(regions)}
-    gateway = SimpleNamespace(enabled=True, classify_regions=lambda image, rows: [
-        {"index": 2, "category": "overlay", "confidence": .89},
-        {"index": 1, "category": "scene", "confidence": .98},
-        {"index": 0, "category": "overlay", "confidence": .95},
-    ])
-    warnings = []
-    pipeline._classify_uncertain(synthetic(), groups, gateway, warnings)
-    assert groups["selected"][0]["polygon"] == regions[0]["polygon"]
-    assert groups["protected"][0]["polygon"] == regions[1]["polygon"]
-    assert groups["uncertain"][0]["polygon"] == regions[2]["polygon"]
-    assert not warnings
-
-
-def test_classification_budget_failure_preserves_uncertain_text():
-    def exhausted(*args):
-        raise BudgetExceeded("test budget exhausted")
-    groups = {"selected": [], "protected": [], "uncertain": [region()]}
-    before = deepcopy(groups)
-    warnings = []
-    pipeline._classify_uncertain(synthetic(), groups,
-                                 SimpleNamespace(enabled=True, classify_regions=exhausted), warnings)
-    assert groups == before
-    assert any("BudgetExceeded" in warning for warning in warnings)
 
 
 def test_repair_budget_failure_does_not_promote_output(tmp_path, config):
@@ -197,8 +161,8 @@ def prepare_run(monkeypatch, tmp_path, images):
     source.write_bytes(b"fixture input identity; decoding replaced by known PNG candidates")
     output = tmp_path / "result"
     scans = []
-    def fake_scan(path, destination, video_cfg, selection, count, source_hash, resume=False):
-        scans.append(resume)
+    def fake_scan(path, destination, video_cfg, selection, count):
+        scans.append(path)
         rows = [candidate(destination, image, f"frame{i:03d}", i) for i, image in enumerate(images, 1)]
         return {"candidates": rows, "warnings": [], "video": {"duration": len(images)},
                 "decoded_frames": len(images), "sampled_frames": len(images)}
@@ -210,22 +174,26 @@ def prepare_run(monkeypatch, tmp_path, images):
 
 def test_completed_resume_audits_without_new_api_or_decode(tmp_path, config, monkeypatch):
     source, output, scans = prepare_run(monkeypatch, tmp_path, [synthetic()])
-    first = pipeline.run(str(source), output, config)
+    selected = ["frame001"]
+    pipeline.prepare_selection(str(source), output, config)
+    first = pipeline.run(str(source), output, config, selected=selected)
     assert first["status"] == "complete"
     assert first["mode"] == "mock_gemini+mock_ocr"
-    assert first["api"]["mock_calls"] == 3  # ranking, cropped repair, semantic QC
+    assert first["api"]["mock_calls"] == 1
     assert first["api"]["api_calls"] == 0
     manifest = {p.name: p.read_bytes() for p in (output / "images").glob("*.png")}
-    resumed = pipeline.run(str(source), output, config, resume=True)
+    resumed = pipeline.run(str(source), output, config, resume=True, selected=selected)
     assert resumed["resumed_complete"] is True
     assert resumed["api"]["mock_calls"] == first["api"]["mock_calls"]
     assert len(scans) == 1
     assert {p.name: p.read_bytes() for p in (output / "images").glob("*.png")} == manifest
 
 
-def test_interrupted_resume_reuses_rankings_and_passed_candidates(tmp_path, config, monkeypatch):
+def test_interrupted_resume_reuses_passed_candidates(tmp_path, config, monkeypatch):
     config["run"]["count"] = 2
     source, output, scans = prepare_run(monkeypatch, tmp_path, [synthetic(1), synthetic(2)])
+    selected = ["frame001", "frame002"]
+    pipeline.prepare_selection(str(source), output, config)
     actual = pipeline._candidate
     calls = []
     def interrupt_second(row, *args):
@@ -235,34 +203,35 @@ def test_interrupted_resume_reuses_rankings_and_passed_candidates(tmp_path, conf
         return actual(row, *args)
     monkeypatch.setattr(pipeline, "_candidate", interrupt_second)
     with pytest.raises(KeyboardInterrupt):
-        pipeline.run(str(source), output, config)
+        pipeline.run(str(source), output, config, selected=selected)
     saved = read_json(output / ".checkpoint.json")
     assert len(saved["items"]) == 1
-    assert len(saved["ranking"]) == 2
     already_passed = next(iter(saved["items"]))
     resumed_calls = []
     def track(row, *args):
         resumed_calls.append(row["id"])
         return actual(row, *args)
     monkeypatch.setattr(pipeline, "_candidate", track)
-    report = pipeline.run(str(source), output, config, resume=True)
+    report = pipeline.run(str(source), output, config, resume=True, selected=selected)
     assert report["status"] == "complete", report
     assert already_passed not in resumed_calls
     assert len(resumed_calls) == 1
-    assert report["api"]["mock_calls"] == 5  # one rank batch + two edit/review pairs
+    assert report["api"]["mock_calls"] == 2
 
 
 def test_budget_shortfall_can_resume_after_raising_budget(tmp_path, config, monkeypatch):
     source, output, scans = prepare_run(monkeypatch, tmp_path, [synthetic()])
-    config["gemini"]["max_calls"] = 1  # ranking succeeds; repair waits for more budget.
-    first = pipeline.run(str(source), output, config)
+    selected = ["frame001"]
+    pipeline.prepare_selection(str(source), output, config)
+    config["gemini"]["max_calls"] = 0
+    first = pipeline.run(str(source), output, config, selected=selected)
     assert first["status"] == "partial"
     assert first["items"][0]["issues"] == ["api_budget_exhausted"]
     config["gemini"]["max_calls"] = 5
-    resumed = pipeline.run(str(source), output, config, resume=True)
+    resumed = pipeline.run(str(source), output, config, resume=True, selected=selected)
     assert resumed["status"] == "complete"
     assert resumed["items"][0]["status"] == "passed"
-    assert resumed["api"]["mock_calls"] == 3  # reuse original ranking, spend only edit/review
+    assert resumed["api"]["mock_calls"] == 1
 
 def test_selected_workflow_prepares_locally_and_sends_only_explicit_edits(tmp_path, config, monkeypatch):
     source, output, scans = prepare_run(monkeypatch, tmp_path, [synthetic(), synthetic(2)])
@@ -283,12 +252,11 @@ def test_selected_workflow_prepares_locally_and_sends_only_explicit_edits(tmp_pa
     assert report["requested_count"] == 1
     assert report["api"]["mock_calls"] == 1
     assert report["api"]["api_calls"] == 0
-    assert report["ranking"] == {}
     assert len(scans) == 1
     item, = report["items"]
     assert item["id"] == "frame002"
     assert item["ranking"]["source"] == "operator_selected"
-    assert item["method"] == "level4_gemini"
+    assert item["method"] == "gemini_full_frame"
     assert item["qc"]["outside_changed_pixels"] == 0
     assert list((output / "images").glob("*.png")) == [output / "images/frame002.png"]
 
@@ -302,3 +270,16 @@ def test_selected_workflow_does_not_export_frames_without_target_text(tmp_path, 
     assert report["api"]["mock_calls"] == 0
     assert report["items"][0]["issues"] == ["no_target_text"]
     assert not list((output / "images").glob("*.png"))
+
+
+
+def test_reviewed_clean_frame_uses_no_provider_call(tmp_path, config, monkeypatch):
+    source, output, _ = prepare_run(monkeypatch, tmp_path, [synthetic()])
+    monkeypatch.setattr(pipeline, "OCRDetector", lambda *args: ReferenceDetector([]))
+    pipeline.prepare_selection(str(source), output, config)
+    config["ocr"]["reviewed_frames"] = {"frame001": []}
+    report = pipeline.run(str(source), output, config, selected=["frame001"])
+    assert report["status"] == "complete"
+    assert report["api"]["mock_calls"] == 0
+    assert report["items"][0]["method"] == "unchanged"
+    assert report["items"][0]["qc"]["outside_changed_pixels"] == 0

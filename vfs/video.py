@@ -1,4 +1,4 @@
-"""One sequential decode, bounded candidate groups and same-shot donor frames."""
+"""One sequential decode, bounded candidate groups and same-shot OCR context."""
 from __future__ import annotations
 
 from collections import deque
@@ -19,7 +19,7 @@ import cv2
 from scenedetect.detectors import ContentDetector
 
 from .quality import metrics, acceptable, phash, hash_distance
-from .util import atomic_json, read_json, resize_long, write_png
+from .util import resize_long, write_png
 
 
 def validate_public_url(url: str) -> None:
@@ -110,18 +110,11 @@ def probe(path: Path, config: dict) -> dict:
 
 
 def scan_candidates(path: Path, output: Path, video_config: dict, selection: dict,
-                    count: int, source_hash: str, resume: bool = False) -> dict:
+                    count: int) -> dict:
     cache = output / ".cache/frames"
-    cache.mkdir(parents=True, exist_ok=True)
-    index_path = cache / "index.json"
-    if resume and index_path.exists():
-        saved = read_json(index_path)
-        if saved.get("source_sha256") == source_hash and all(
-                (output / c["path"]).is_file() for c in saved["candidates"]):
-            saved["reused_scan"] = True
-            return saved
-    # A failed first scan is repeated, not appended to an unaccounted disk cache.
-    shutil.rmtree(cache)
+    # Restart interrupted preparation from a fresh candidate cache.
+    if cache.exists():
+        shutil.rmtree(cache)
     cache.mkdir(parents=True, exist_ok=True)
     info = probe(path, video_config)
     duration = info["duration"]
@@ -231,11 +224,9 @@ def scan_candidates(path: Path, output: Path, video_config: dict, selection: dic
         seen.append(candidate["phash"])
         candidate.pop("future_count", None)
         ordered.append(candidate)
-    result = {"source_sha256": source_hash, "video": info, "candidates": ordered,
+    return {"video": info, "candidates": ordered,
               "decoded_frames": frame_index + 1, "sampled_frames": sample_index,
               "sample_interval_seconds": step, "scenes": scene + 1,
-              "peak_cache_bytes": peak_cache_bytes, "reused_scan": False,
+              "peak_cache_bytes": peak_cache_bytes,
               "warnings": scan_issues,
               "pixel_baseline": "OpenCV FFmpeg BGR uint8 decoded frame, coded orientation"}
-    atomic_json(index_path, result)
-    return result

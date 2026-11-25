@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real CPU/OCR end-to-end test; no external media and no real Gemini calls."""
+"""Exercise decode, selected-frame Mock editing, resume, and audit without network."""
 from __future__ import annotations
 
 import argparse
@@ -24,19 +24,34 @@ def execute(argv):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--workdir", type=Path, required=True, help="A new, non-existing directory")
-    p.add_argument("--mock-gemini", action="store_true", help="Exercise Mock API orchestration too")
     args = p.parse_args()
     root = args.workdir.resolve()
     root.mkdir(parents=True, exist_ok=False)
     video, truth, output = root / "demo.mkv", root / "truth", root / "output"
     execute(["scripts/make_demo.py", "--output", video, "--truth-dir", truth])
-    command = ["pipeline.py", "--input", video, "--count", "3", "--output", output,
-               "--config", "configs/demo.toml", "--mock-gemini" if args.mock_gemini else "--offline"]
     before = time.monotonic()
+    execute(["pipeline.py", "--prepare", "--input", video, "--output", output,
+             "--config", "configs/demo.toml"])
+    ground_truth = json.loads((truth / "ground_truth.json").read_text())
+    index = json.loads((output / "selection/index.json").read_text())
+    selected = [min(index["candidates"], key=lambda row: abs(row["time"]-timestamp))
+                for timestamp in (0.5, 2.0, 6.0)]
+    assert len({row["id"] for row in selected}) == 3
+    config = root / "overlays.toml"
+    lines = [(ROOT / "configs/demo.toml").read_text().rstrip(), "", "[ocr.reviewed_frames]"]
+    for row in selected:
+        regions = ground_truth["records"][row["frame_index"]]["remove"]
+        boxes = ", ".join(
+            f'{{kind="subtitle", box={region["bbox"]}}}' for region in regions
+        )
+        lines.append(f'{row["id"]} = [{boxes}]')
+    config.write_text("\n".join(lines) + "\n")
+    command = ["pipeline.py", "--input", video, "--output", output, "--config", config, "--mock-gemini"]
+    for row in selected:
+        command.extend(["--select-frame", row["id"]])
     execute(command)
     elapsed = time.monotonic() - before
     report = json.loads((output / "report.json").read_text())
-    ground_truth = json.loads((truth / "ground_truth.json").read_text())
     results = []
     for item in report["items"]:
         if item["status"] != "passed":
@@ -59,15 +74,16 @@ def main():
                         "dimensions": [640, 360], "sha256": file_sha256(output / item["files"]["image"])})
     assert len(results) == 3
     assert report["api"]["api_calls"] == 0
-    assert not (output / ".cache/frames").exists(), "Finished scan cache was not cleaned"
+    assert report["api"]["mock_calls"] == 3
+    candidates_hash = file_sha256(output / "selection/index.json")
     execute([*command, "--resume"])
-    assert not (output / ".cache/frames").exists(), "Completed resume unexpectedly decoded frames"
+    assert file_sha256(output / "selection/index.json") == candidates_hash
     for item in results:
         assert file_sha256(output / "images" / (item["id"] + ".png")) == item["sha256"]
     execute(["pipeline.py", "--output", output, "--qc-only"])
     assert json.loads((output / "qc_report.json").read_text())["status"] == "qc_passed"
     summary = {"passed": True, "real_ocr": True, "real_video_decode": True,
-               "real_gemini_calls": 0, "mock_gemini": args.mock_gemini,
+               "real_gemini_calls": 0, "mock_gemini": True,
                "pipeline_wall_seconds": round(elapsed, 3),
                "scan": report["scan"], "api": report["api"], "ocr": report["ocr"],
                "items": results, "resume_no_redecode": True, "qc_only_passed": True}

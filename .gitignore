@@ -1,18 +1,33 @@
+# Secrets and environment overrides
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+
+# Local Python runtime and tooling
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.DS_Store
+
+# Job data, private media, and rendered deliverables
+/runs/
+/catering-xhs/
 output*/
 artifacts/
 .cache/
 *.mkv
 *.mp4
 *.mov
+*.m4v
 *.avi
 *.webm
 *.onnx
@@ -20,15 +35,13 @@ artifacts/
 *.pth
 *.safetensors
 *.zip
-.DS_Store
 
-# Local jobs, partner photos, design JSON, unpublished captions, and renders.
-/runs/
-/catering-xhs/
-
-# Workflow state and generated selection previews.
+# Generated manifests and state when a custom output path is used
 .gallery.lock
 .vfs.lock
 .checkpoint.json
 **/selection/index.json
 **/selection/sheet-*.png
+**/qc_report.md
+**/qc_report.json
+**/gallery-report.json
