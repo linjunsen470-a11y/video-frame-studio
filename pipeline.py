@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import os
 from pathlib import Path
-import re
 import sys
 
 from vfs.runtime import cloud_startup_allowed
@@ -14,7 +12,7 @@ from vfs.runtime import cloud_startup_allowed
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="CPU video stills with exact outside-mask pixel preservation")
-    parser.add_argument("--input", action="append", help="Local video or direct public HTTP(S) media URL; repeat for a batch")
+    parser.add_argument("--input", help="Local video or direct public HTTP(S) media URL")
     parser.add_argument("--output", type=Path, default=Path("output"))
     parser.add_argument("--count", type=int)
     parser.add_argument("--candidates", type=int)
@@ -27,10 +25,7 @@ def main(argv=None) -> int:
     mode.add_argument("--qc-only", action="store_true", help="Audit existing PNGs without decoding video")
     mode.add_argument("--prepare", action="store_true", help="Generate candidate sheets without any Gemini calls")
     mode.add_argument("--select-frame", action="append", help="Edit a prepared frame ID; repeat in priority order")
-    provider = parser.add_mutually_exclusive_group()
-    provider.add_argument("--offline", action="store_true", help="Skip all Gemini work; keep strict deterministic gates")
-    provider.add_argument("--mock-gemini", action="store_true", help="Test only; explicitly simulated AI results")
-    parser.add_argument("--keep-intermediates", action="store_true")
+    parser.add_argument("--mock-gemini", action="store_true", help="Test only; explicitly simulated AI results")
     args = parser.parse_args(argv)
     if not cloud_startup_allowed():
         return 1
@@ -38,7 +33,7 @@ def main(argv=None) -> int:
     try:
         from vfs.config import ROOT, load_config, load_dotenv, validate_config
         from vfs.pipeline import prepare_selection, quality_only, run
-        from vfs.util import digest, output_lock
+        from vfs.util import output_lock
 
         load_dotenv(ROOT / ".env")
         cfg = load_config(args.config)
@@ -49,12 +44,8 @@ def main(argv=None) -> int:
             value = getattr(args, argument)
             if value is not None:
                 cfg[section][key] = value
-        if args.offline or args.prepare:
-            cfg["gemini"]["enabled"], cfg["gemini"]["mock"] = False, False
-        if args.mock_gemini and not args.prepare:
-            cfg["gemini"]["enabled"], cfg["gemini"]["mock"] = True, True
-        if args.keep_intermediates:
-            cfg["run"]["keep_intermediates"] = True
+        if args.mock_gemini:
+            cfg["gemini"]["mock"] = True
         validate_config(cfg)
         if args.qc_only:
             with output_lock(args.output):
@@ -63,40 +54,20 @@ def main(argv=None) -> int:
             return 0 if result["status"] == "qc_passed" else 2
         if not args.input:
             parser.error("--input is required unless --qc-only")
-        if args.prepare or args.select_frame:
-            if len(args.input) != 1:
-                parser.error("Prepare and selected-frame editing accept one video at a time")
         if args.prepare:
             if args.resume:
                 parser.error("--prepare needs a fresh output directory")
-            index = prepare_selection(args.input[0], args.output, cfg)
+            index = prepare_selection(args.input, args.output, cfg)
             print(f"prepared: {len(index['candidates'])} candidates; {args.output / 'selection/index.json'}")
             return 0
-        if args.select_frame and args.offline:
-            parser.error("--select-frame requires Gemini image editing")
-        if cfg["gemini"]["enabled"] and not cfg["gemini"]["mock"] and not args.select_frame:
+        if not args.select_frame:
             parser.error("Prepare candidates locally, then pass explicit --select-frame IDs")
-        if cfg["gemini"]["enabled"] and not cfg["gemini"]["mock"] and not os.getenv(cfg["gemini"]["api_key_env"]):
-            raise ValueError("GEMINI_API_KEY is missing. Configure .env, or use --offline / --mock-gemini explicitly")
-        exit_code = 0
-        batch_calls_used, batch_reserved_used = 0, 0.0
-        for source in args.input:
-            output = args.output
-            if len(args.input) > 1:
-                stem = re.sub(r"[^a-zA-Z0-9_-]", "_", Path(source.split("?", 1)[0]).stem)[:40] or "video"
-                output = output / f"{stem}-{digest(source)[:8]}"
-            job_config = copy.deepcopy(cfg)
-            # A repeated --input invocation shares the stated budget. Each
-            # video's persistent ledger still includes its own previous attempts.
-            job_config["gemini"]["max_calls"] = max(0, cfg["gemini"]["max_calls"] - batch_calls_used)
-            job_config["gemini"]["max_cost_usd"] = max(0., cfg["gemini"]["max_cost_usd"] - batch_reserved_used)
-            report = run(source, output, job_config, args.resume, selected=args.select_frame)
-            batch_calls_used += report["api"].get("calls", 0)
-            batch_reserved_used += report["api"].get("reserved_cost_usd", 0.)
-            passed = sum(item["status"] == "passed" for item in report["items"])
-            print(f"{report['status']}: {passed}/{report['requested_count']} images; {output / 'report.md'}")
-            exit_code = max(exit_code, 0 if report["status"] == "complete" else 2)
-        return exit_code
+        if not cfg["gemini"]["mock"] and not os.getenv(cfg["gemini"]["api_key_env"]):
+            raise ValueError("GEMINI_API_KEY is missing. Configure .env for editing, or use --mock-gemini in tests")
+        report = run(args.input, args.output, cfg, args.resume, selected=args.select_frame)
+        passed = sum(item["status"] == "passed" for item in report["items"])
+        print(f"{report['status']}: {passed}/{report['requested_count']} images; {args.output / 'report.md'}")
+        return 0 if report["status"] == "complete" else 2
     except KeyboardInterrupt:
         print("Interrupted. Re-run the same command with --resume.", file=sys.stderr)
         return 130

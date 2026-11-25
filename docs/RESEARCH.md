@@ -1,10 +1,12 @@
 # 开源实现调研与取舍
 
+本文保留早期技术调研。当前正式修复仅使用 Gemini 整帧编辑，OpenCV 用于解码、蒙版、配准与像素质检。见 [当前流程](../README.md)。
+
 核实日期：**2026-11-24（北京时间）**。资料来自原始 GitHub 仓库、GitHub REST 返回及官方文档。范围包括 README、许可证、依赖清单和下列代表实现的抽查；**没有逐个安装、运行或审计全部上游项目**。表中的维护时间是此次 API 查询返回的仓库 `pushed_at`，不能等同于最新正式版、默认分支最后提交时间或质量保证。
 
 ## 选择结论
 
-主路径采用 FFmpeg/ffprobe、OpenCV、NumPy 与 CPU OCR，将镜头候选、文字坐标、有限范围 Mask、修复与质量门槛固化到代码。Gemini 仅用于少量候选的语义评分、困难区域编辑和可选视觉复核。已有框架中可借鉴的是算法组合与明确的质量门槛，没必要引入视频修复 GUI、ComfyUI 或训练框架。
+主路径采用 FFmpeg/ffprobe、OpenCV、NumPy 与 CPU OCR，将镜头候选、文字坐标、有限范围 Mask、修复与质量门槛固化到代码。Gemini 为人工选中的帧提供整帧编辑提案。已有框架中可借鉴的是算法组合与明确的质量门槛，没必要引入视频修复 GUI、ComfyUI 或训练框架。
 
 本项目不打包任何上游完整应用、预训练修复模型或视频素材。上游源码许可证和模型权重许可证应分别核查；某个项目允许商用，并不自动覆盖它引用的全部模型、数据、编解码器和第三方素材。
 
@@ -20,7 +22,7 @@
 | [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) | 中文/英文等文字检测与识别，覆盖四边形坐标；字体、旋转、遮挡等仍会影响召回。 | Apache-2.0；活跃上游，代表源码/CPU 官方文档见 [OCR 调研](research-ocr.md)。需要区分代码与模型许可。 | 有 CPU 路径，但完整 Paddle 推理栈和可选文档组件较重。作为对比/替代方案，不把整个应用栈加入默认安装。 |
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) | 基于成熟 OCR 模型的轻量推理封装，可返回文字四边形、内容和置信度。 | Apache-2.0；当前统一包 3.10 支持 headless OpenCV，模型许可另列，见 [OCR 调研](research-ocr.md)。 | 选择 CPU 推理路径；初始化一次、同图缓存。识别置信度不代表文字一定是后期字幕，应另用位置、时序与保护规则判断。 |
 | [Sanster/IOPaint](https://github.com/Sanster/IOPaint) | 图像修复应用，支持多种模型与 UI。 | Apache-2.0；官方仓库 2025-08-13 归档，只读，见 [OCR 调研](research-ocr.md)。 | 适合人工修图或多模型试验；完整 UI/服务和模型生态超出本 CLI 需求。不作为运行时依赖。 |
-| [LaMa](https://github.com/advimman/lama) | 大掩码图像修复模型，处理纹理与背景；不自带字幕/真实文字分类能力。 | 原代码 Apache-2.0；旧模型链接失效提醒见 [OCR 调研](research-ocr.md)；导出的 ONNX 权重还应核查来源、许可和哈希。 | Torch 原版不适合默认轻量环境；只考虑用户提供且可信的 ONNX 模型作为可选级别，未加载真实权重不能声称修复质量已验证。 |
+| [LaMa](https://github.com/advimman/lama) | 大掩码图像修复模型，处理纹理与背景；不自带字幕/真实文字分类能力。 | 原代码 Apache-2.0；旧模型链接失效提醒见 [OCR 调研](research-ocr.md)；导出的 ONNX 权重还应核查来源、许可和哈希。 | Torch 原版不适合默认轻量环境；保留为调研对照。 |
 | [ComfyUI-Inpaint-CropAndStitch](https://github.com/lquesada/ComfyUI-Inpaint-CropAndStitch) | 按 Mask 外接区域裁剪，推理后拼回原图；支持尺寸适配。抽查 `inpaint_cropandstitch.py` 和 pyproject，依赖 Torch、Torchvision、SciPy、ComfyUI 生态。 | GPL-3.0；`pushed_at` 2026-10-21，未归档。 | 节点工具在 CPU 上有代码路径，但整个生成图像工作流并不轻量。本项目仅使用公开通用的裁剪/有限 Mask 合成思路，**不复制 GPL 节点实现、不引入 ComfyUI**。 |
 | [FFmpeg](https://ffmpeg.org/) | ffprobe 读取流信息；ffmpeg 解码、采样、无损帧输出。 | 主要 LGPL-2.1-or-later；启用 GPL 组件会改变对应 FFmpeg 构建许可。官方最新稳定页显示 9.1 于 2026-11-20 发布。 | CPU 解码成熟；系统独立命令调用可省 Python 封装。项目不分发 FFmpeg 二进制；实际构建可用 `ffmpeg -buildconf` 检查。原始分辨率不等于保留原始 HDR/10-bit 色深，应明确解码后的 BGR8 工作空间。 |
 | [OpenCV](https://opencv.org/) | 图像变换、边缘/形态学、配准、Telea/Navier–Stokes 修复。官方 inpaint 使用单通道 8-bit 非零 Mask 指定修复区域。 | 4.5 及以后 Apache-2.0；更早版本 BSD-3-Clause。上游 2026-11-24 仍有提交。 | 主要算法可在 CPU 运行；细线、小洞和平滑背景合适，无法保证大块遮挡下的人脸/结构恢复。本项目直接调用成熟算法，最终通过 NumPy 严格限制修改区域。 |
@@ -31,7 +33,7 @@
 - **上游设计参考，不等同于逐项复现。** 已查看了 smart-thumbnailer 的指标和筛选实现、YaoFANGUK 的字幕连续区间与场景划分、SysAdminDoc 的参考帧配准、lighthouse 的模型加载、PySceneDetect 的 HSV 内容差及 CropAndStitch 的依赖/张量处理。项目源码中的独立实现由本项目测试验证；没有用“GitHub 星数”替代质量判断。
 - **一个环境只应有一个 OpenCV 包。** `opencv-python`、`opencv-python-headless`、contrib 变体都会提供 `cv2`，必须检查解析结果；CPU/服务器优先 headless，但最终以 OCR 包实际依赖为准。默认路径不混装 Paddle、Torch、ComfyUI。
 - **输入与输出的像素合同。** 精确不变基准是保存到 `originals/` 的解码帧，最终 PNG 重新读取后检查 Mask 外差分；不能将有损视频编码前不存在的“原始 RGB”作为基准。若羽化扩张，则羽化支持域计入最终 Mask。
-- **质量能力边界。** OCR 检出“文字”不等于检出“字幕”；几何和时序只能提供启发式证据。OCR 未检出不证明绝无残留。Gemini 自然程度复核也不是客观真值，应在报告中保留结果与不确定项。
+- **质量能力边界。** OCR 检出“文字”不等于检出“字幕”；几何和时序只能提供启发式证据。OCR 未检出不证明绝无残留。人工查看实际修复区域并记录可见问题。
 - **费用与版本。** Gemini 的模型与价格单独配置，详细官方资料见 [Gemini 调研](research-gemini.md)。本调研没有据此声称已调用真实 Gemini API；实测范围以交付测试记录为准。
 
 ## 可追溯来源

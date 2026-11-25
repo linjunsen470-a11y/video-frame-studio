@@ -1,6 +1,6 @@
 ---
 name: video-frame-studio
-description: Extract high-quality PNG stills from a video and remove subtitles using this repository's CPU CLI, cached OCR, conservative masks and Gemini-only crop editing after Codex selects frames. Use when asked to process videos, resume a run, or audit frame exports; do not redesign the workflow.
+description: Extract high-quality PNG stills from a video and remove subtitles using this repository's CPU CLI, cached OCR, conservative masks and Gemini whole-frame proposals and local mask compositing after Codex selects frames. Use when asked to process videos, resume a run, or audit frame exports; do not redesign the workflow.
 ---
 
 # Video Frame Studio
@@ -13,8 +13,8 @@ Work from the repository root containing `pipeline.py`. Read `AGENTS.md` once.
    to select exact frames and record timestamps and reasons.
 3. Run the same input/output with one `--select-frame ID` per chosen frame,
    in priority order, and use the user's budget. Supply `GEMINI_API_KEY`
-   through the environment or local `.env`. Gemini edits only the local crop
-   and mask. Use Mock only for simulated testing.
+   through the environment or local `.env`. Send the complete frame and one combined mask to Gemini per attempt.
+   Apply the aligned response only inside the approved mask. Use Mock only for simulated testing.
 4. Resume an interrupted run with the same arguments plus `--resume`. Preserve
    the budget ledger; do not delete caches to evade a limit. Increase limits only
    within the user's authorized budget. Final failed quality attempts stay failed.
@@ -22,9 +22,14 @@ Work from the repository root containing `pipeline.py`. Read `AGENTS.md` once.
    meets the requested count; exit 2 is a quality shortfall; exit 1 is an error.
 6. Audit restored/existing output:
    `python pipeline.py --output OUTPUT --qc-only`. This calls no Gemini API.
-7. Visually inspect each repaired area. Deliver passed `images/*.png`, their originals/masks and the reports. Exclude
-   review previews from final results. State any shortfall and whether Gemini was
-   real, disabled or mocked.
+7. Visually inspect each repaired area. Keep approved PNGs, originals, masks and reports.
+   Report shortfalls with comparison previews and the provider mode. Use the compact
+   gallery delivery format for Xiaohongshu.
+
+For Xiaohongshu handoff, visually review every selected source frame. Use the
+`ocr.reviewed_frames` boxes in the README for subtitles and standalone ad overlays,
+including any OCR misses. An explicit empty list confirms a frame without target
+overlays. Use the gallery CLI for delivery JPEGs and copy.
 
 Preserve true text through `ocr.keep_words` or `ocr.protect_regions` in a TOML
 config. Use `--subtitle-mode all` only when the user intends all detected text to

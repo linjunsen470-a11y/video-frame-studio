@@ -1,4 +1,4 @@
 interface:
   display_name: "Video Frame Studio"
-  short_description: "Run CPU video frame extraction and subtitle cleanup"
+  short_description: "Select video frames and remove overlays with Gemini"
   default_prompt: "Use $video-frame-studio to extract clean PNG frames from this video within my API budget."

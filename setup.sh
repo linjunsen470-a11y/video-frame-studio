@@ -30,4 +30,4 @@ fi
 .venv/bin/python -m pip check
 .venv/bin/python -c 'import cv2, rapidocr, onnxruntime; from google import genai; print("CPU runtime ready")'
 echo 'Ready: source .venv/bin/activate'
-echo 'Then configure .env from .env.example, or use --offline.'
+echo 'Configure .env from .env.example for real Gemini edits.'

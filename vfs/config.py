@@ -40,15 +40,13 @@ def load_config(path: Path | None = None) -> dict:
             if section not in config or not isinstance(values, dict):
                 raise ValueError(f"Unknown configuration section: {section}")
             # Provider settings can grow without a pipeline release. Other sections strict.
-            if section not in {"gemini", "ocr", "mask", "repair"}:
+            if section not in {"gemini", "ocr", "mask"}:
                 unknown = set(values) - set(config[section])
                 if unknown:
                     raise ValueError(f"Unknown settings in {section}: {sorted(unknown)}")
             config[section].update(values)
-    for key, env in (("analysis_model", "GEMINI_ANALYSIS_MODEL"),
-                     ("image_model", "GEMINI_IMAGE_MODEL")):
-        if os.getenv(env):
-            config["gemini"][key] = os.environ[env]
+    if image_model := os.getenv("GEMINI_IMAGE_MODEL"):
+        config["gemini"]["image_model"] = image_model
     return config
 
 
@@ -65,7 +63,7 @@ def validate_config(cfg: dict) -> None:
     finite_tree(cfg)
     integer_fields = {"run": ("count", "max_attempts", "threads"),
                       "video": ("candidates", "max_candidates", "max_scan_samples", "neighbors", "max_pixels"),
-                      "gemini": ("max_calls", "max_retries", "rank_batch_size")}
+                      "gemini": ("max_calls", "max_retries")}
     for section, keys in integer_fields.items():
         for key in keys:
             if type(cfg[section][key]) is not int:
@@ -82,15 +80,25 @@ def validate_config(cfg: dict) -> None:
             raise ValueError(f"{sec}.{key} must be positive")
     if cfg["ocr"]["mode"] not in {"auto", "subtitle", "all", "manual"}:
         raise ValueError("Unknown subtitle mode")
+    reviewed = cfg["ocr"].get("reviewed_frames", {})
+    if not isinstance(reviewed, dict):
+        raise ValueError("ocr.reviewed_frames must map frame IDs to lists")
+    for frame_id, entries in reviewed.items():
+        if re.fullmatch(r"f[0-9]+", frame_id) is None or not isinstance(entries, list):
+            raise ValueError("Invalid reviewed frame ID or region list")
+        for entry in entries:
+            if (not isinstance(entry, dict) or set(entry) - {"kind", "box", "text"}
+                    or entry.get("kind") not in ("subtitle", "ad_label")
+                    or not isinstance(entry.get("text", ""), str)
+                    or not isinstance(entry.get("box"), list) or len(entry["box"]) != 4
+                    or any(type(value) is not int for value in entry["box"])):
+                raise ValueError(f"Invalid reviewed overlay in {frame_id}")
     if cfg["gemini"]["max_calls"] < 0 or cfg["gemini"]["max_cost_usd"] < 0:
         raise ValueError("API budgets cannot be negative")
     if cfg["video"]["candidates"] < 0:
         raise ValueError("candidates cannot be negative")
-    if not 1 <= cfg["gemini"]["rank_batch_size"] <= 16:
-        raise ValueError("rank_batch_size must be between 1 and 16")
-    for key in ("max_retries", "crop_padding"):
-        if cfg["gemini"][key] < 0:
-            raise ValueError(f"gemini.{key} cannot be negative")
+    if cfg["gemini"]["max_retries"] < 0:
+        raise ValueError("gemini.max_retries cannot be negative")
     for key in ("calls_per_minute", "timeout_seconds"):
         if cfg["gemini"][key] <= 0:
             raise ValueError(f"gemini.{key} must be positive")
@@ -102,8 +110,6 @@ def validate_config(cfg: dict) -> None:
             if (not isinstance(limits, dict) or set(limits) != {"rpm", "tpm", "rpd"} or
                     any(type(value) is not int or value <= 0 for value in limits.values())):
                 raise ValueError(f"gemini.quota.{model} requires positive integer rpm, tpm and rpd")
-    if not 0 <= cfg["selection"]["semantic_weight"] <= 1:
-        raise ValueError("semantic_weight must be between 0 and 1")
     for section, key in (("qc", "max_mask_fraction"), ("mask", "max_area_fraction"),
                          ("ocr", "confidence"), ("ocr", "bottom_start"),
                          ("qc", "residual_overlap"), ("qc", "min_sharpness_ratio")):
@@ -119,7 +125,7 @@ def validate_config(cfg: dict) -> None:
 def semantic_config(cfg: dict) -> dict:
     """Resume permits larger budgets/threads, never silently different image semantics."""
     result = copy.deepcopy(cfg)
-    for key in ("threads", "keep_intermediates", "previews"):
+    for key in ("threads", "previews"):
         result["run"].pop(key, None)
     for key in ("max_calls", "max_cost_usd", "calls_per_minute", "timeout_seconds"):
         result["gemini"].pop(key, None)

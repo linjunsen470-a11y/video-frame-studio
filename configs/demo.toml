@@ -10,6 +10,3 @@ sample_seconds = 0.5
 
 [selection]
 phash_distance = 3
-
-[gemini]
-enabled = false

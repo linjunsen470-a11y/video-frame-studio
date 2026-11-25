@@ -222,8 +222,7 @@ def test_lossless_fixture_one_decode_pass_and_reusable_scan(tmp_path, monkeypatc
         return capture(*args, **kwargs)
 
     monkeypatch.setattr(cv2, "VideoCapture", counted_capture)
-    source_hash = file_sha256(input_file)
-    result = video.scan_candidates(input_file, output, video_cfg, selection, 3, source_hash)
+    result = video.scan_candidates(input_file, output, video_cfg, selection, 3)
     assert len(opens) == 1
     assert result["decoded_frames"] == len(frames)
     assert result["candidates"]
@@ -231,6 +230,3 @@ def test_lossless_fixture_one_decode_pass_and_reusable_scan(tmp_path, monkeypatc
         actual = cv2.imread(str(output / candidate["path"]))
         assert np.array_equal(actual, frames[candidate["frame_index"]])
         assert all(donor["scene"] == candidate["scene"] for donor in candidate["neighbors"])
-    resumed = video.scan_candidates(input_file, output, video_cfg, selection, 3, source_hash, resume=True)
-    assert resumed["reused_scan"]
-    assert len(opens) == 1

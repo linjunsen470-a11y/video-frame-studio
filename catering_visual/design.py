@@ -8,13 +8,10 @@ import re
 
 from PIL import Image, ImageOps
 
-from .presets import LAYOUTS, PRESETS, STYLES
-
 FORMATS = {"JPEG", "PNG", "WEBP"}
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_PIXELS = 32_000_000
 IDENTIFIER = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
-HEX = re.compile(r"#[0-9a-fA-F]{6}\Z")
 
 
 def digest(path):
@@ -82,94 +79,53 @@ def text_value(value, field):
         raise ValueError(f"{field} must be text of up to 300 characters")
 
 
-def validate_theme(theme, name):
-    require_keys(theme, "background foreground accent line margin gap radius border shadow headline_size", name)
-    for key, value in theme.items():
-        if key in {"background", "foreground", "accent", "line"}:
-            color(value, key)
-        else:
-            bounds = (24, 120) if key == "headline_size" else (0, 128)
-            number(value, *bounds, key)
+def validate_copy(copy):
+    require_keys(copy, "title body tags", "copy")
+    for key in ("title", "body"):
+        text_value(copy.get(key), key)
+        if not copy[key].strip():
+            raise ValueError(f"copy.{key} is required")
+    tags = copy.get("tags")
+    if not isinstance(tags, list) or not 1 <= len(tags) <= 8:
+        raise ValueError("copy.tags requires 1–8 topics")
+    for tag in tags:
+        if not isinstance(tag, str) or not re.fullmatch(r"[^#\s]{1,24}", tag):
+            raise ValueError("Provide topic names without # or spaces")
 
 
 def validate_plan(plan):
-    require_keys(plan, "version asset_root canvas style theme fonts pages", "plan")
-    if type(plan.get("version")) is not int or plan["version"] != 1:
-        raise ValueError("Expected plan version 1")
-    style = plan.get("style", "real-photo")
-    if not isinstance(style, str) or style not in STYLES:
-        raise ValueError(f"Unknown style: {style}")
-    if not isinstance(plan.get("asset_root", "."), str) or not plan.get("asset_root", "."):
+    if not isinstance(plan, dict) or type(plan.get("version")) is not int or plan["version"] != 2:
+        raise ValueError("Expected a version 2 Xiaohongshu plan. Create it with the current plan command.")
+    require_keys(plan, "version asset_root copy pages", "plan")
+    if not isinstance(plan.get("asset_root"), str) or not plan["asset_root"]:
         raise ValueError("asset_root must be a directory path")
-    canvas = plan.get("canvas", {})
-    require_keys(canvas, "width height", "canvas")
-    for coordinate, default in (("width", 1080), ("height", 1440)):
-        value = canvas.get(coordinate, default)
-        if type(value) is not int or not 320 <= value <= 4096:
-            raise ValueError(f"canvas.{coordinate} must be an integer between 320 and 4096")
-    validate_theme(plan.get("theme", {}), "theme")
-    fonts = plan.get("fonts", {})
-    require_keys(fonts, "regular bold", "fonts")
-    for role, entry in fonts.items():
-        require_keys(entry, "path index", f"fonts.{role}")
-        if not isinstance(entry.get("path"), str) or not entry["path"]:
-            raise ValueError(f"fonts.{role}.path is required")
-        index = entry.get("index", 0)
-        if type(index) is not int or not 0 <= index <= 64:
-            raise ValueError(f"fonts.{role}.index must be an integer between 0 and 64")
+    validate_copy(plan.get("copy"))
     pages = plan.get("pages")
     if not isinstance(pages, list) or not 1 <= len(pages) <= 100:
         raise ValueError("Plan must contain 1–100 pages")
     ids = set()
     for page in pages:
-        require_keys(page, "id preset layout style theme label headline caption photos", "page")
+        require_keys(page, "id photos fit focal", "page")
         page_id = page.get("id")
         if not isinstance(page_id, str) or not IDENTIFIER.fullmatch(page_id) or page_id.casefold() in ids:
             raise ValueError(f"Invalid or duplicate page ID: {page_id}")
         ids.add(page_id.casefold())
-        preset = page.get("preset")
-        if preset is not None and (not isinstance(preset, str) or preset not in PRESETS):
-            raise ValueError(f"Unknown preset: {preset}")
-        layout = page.get("layout", PRESETS.get(preset))
-        if not isinstance(layout, str) or layout not in LAYOUTS:
-            raise ValueError(f"{page_id}: provide a known layout or preset")
-        if preset and layout != PRESETS[preset]:
-            raise ValueError(f"{page_id}: preset and layout disagree")
-        page_style = page.get("style", style)
-        if not isinstance(page_style, str) or page_style not in STYLES:
-            raise ValueError(f"{page_id}: unknown style {page_style}")
-        validate_theme(page.get("theme", {}), f"{page_id}.theme")
-        for key in ("label", "headline", "caption"):
-            if key in page:
-                text_value(page[key], key)
         photos = page.get("photos")
-        count = len(LAYOUTS[layout][1])
-        if not isinstance(photos, list) or len(photos) != count:
-            raise ValueError(f"{page_id}: {layout} requires {count} photos")
-        for photo in photos:
-            require_keys(photo, "src fit focal label adjustments", "photo")
-            if not isinstance(photo.get("src"), str) or not photo["src"]:
-                raise ValueError("photo.src is required")
-            if photo.get("fit", "cover") not in ("cover", "contain"):
-                raise ValueError("photo.fit must be cover or contain")
-            focal = photo.get("focal", [0.5, 0.5])
-            if not isinstance(focal, list) or len(focal) != 2:
-                raise ValueError("photo.focal must be [x, y]")
-            for value in focal:
-                number(value, 0, 1, "photo.focal value")
-            if "label" in photo:
-                text_value(photo["label"], "photo.label")
-            adjustments = photo.get("adjustments", {})
-            require_keys(adjustments, "brightness contrast saturation", "photo.adjustments")
-            for key, value in adjustments.items():
-                number(value, 0.85, 1.15, key)
+        if (not isinstance(photos, list) or len(photos) not in (1, 2)
+                or any(not isinstance(photo, str) or not photo for photo in photos)):
+            raise ValueError(f"{page_id}: provide one portrait or two landscape photos")
+        if len(photos) == 2 and ("fit" in page or "focal" in page or photos[0] == photos[1]):
+            raise ValueError(f"{page_id}: landscape pages require two distinct, unmodified frames")
+        if page.get("fit", "cover") not in ("cover", "contain"):
+            raise ValueError("fit must be cover or contain")
+        focal = page.get("focal", [0.5, 0.5])
+        if not isinstance(focal, list) or len(focal) != 2:
+            raise ValueError("focal must be [x, y]")
+        for value in focal:
+            number(value, 0, 1, "focal value")
     return plan
 
 
 def load_plan(path):
     with path.open(encoding="utf-8") as handle:
         return validate_plan(json.load(handle))
-
-
-def page_layout(page):
-    return page["layout"] if "layout" in page else PRESETS[page["preset"]]

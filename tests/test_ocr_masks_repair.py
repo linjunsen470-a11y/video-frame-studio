@@ -8,7 +8,7 @@ import pytest
 
 from vfs.masks import build_mask, polygon_mask
 from vfs.ocr import OCRDetector, OCRUnavailable, select_regions
-from vfs.repair import composite_local, conventional_inpaint, onnx_inpaint, temporal_restore
+from vfs.repair import composite_local
 
 
 def region(text="SUBTITLE", x=80, y=270, width=400, height=35):
@@ -62,14 +62,6 @@ def test_composite_exact_outside_support_after_lossless_png(tmp_path, feather):
     assert np.array_equal(loaded[mask > 0], malicious_whole_frame_edit[mask > 0])
     assert np.all(final[mask > 0] == 255)
     assert np.count_nonzero(final) <= 2*(17+2*feather)*(17+2*feather)
-
-
-def test_simple_repair_removes_white_text_and_preserves_background():
-    clean, image, box = text_fixture(background=(100, 100, 100))
-    mask, _ = build_mask(image, [box], {})
-    output, support = composite_local(image, conventional_inpaint(image, mask), mask)
-    assert np.array_equal(output[support == 0], image[support == 0])
-    assert np.mean(np.abs(output.astype(float)-clean.astype(float))) < 0.5
 
 
 def test_auto_preserves_static_brand_text_and_tracks_dynamic_overlay():
@@ -126,52 +118,6 @@ def test_unknown_ocr_schema_cannot_mean_no_text(tmp_path):
         detector.detect(np.full((100, 100, 3), 180, np.uint8))
 
 
-def test_temporal_restores_true_background_and_rejects_contamination():
-    clean, image, box = text_fixture()
-    mask, _ = build_mask(image, [box], {})
-    repaired, stats = temporal_restore(image, mask, [{"image": clean, "mask": np.zeros(mask.shape, np.uint8)}], {})
-    assert stats["success"] and stats["coverage"] == 1
-    assert np.array_equal(repaired[mask > 0], clean[mask > 0])
-    contaminated, failure = temporal_restore(image, mask, [{"image": image, "mask": mask}], {})
-    assert not failure["success"]
-    assert np.array_equal(contaminated, image)
-
-
-def test_temporal_rejects_scene_cut_and_unverified_donor():
-    _, image, box = text_fixture()
-    mask, _ = build_mask(image, [box], {})
-    unrelated = np.full_like(image, 225)
-    output, stats = temporal_restore(image, mask, [
-        {"image": unrelated, "mask": np.zeros(mask.shape, np.uint8)},
-        {"image": image},
-        {"image": image, "mask": mask, "same_scene": False},
-    ], {})
-    assert not stats["success"]
-    assert len(stats["rejected"]) == 3
-    assert np.array_equal(output, image)
-
-
-def test_onnx_adapter_contract_with_mock_runtime(tmp_path, monkeypatch):
-    class Input:
-        def __init__(self, name, channels):
-            self.name, self.type, self.shape = name, "tensor(float)", [1, channels, 64, 64]
-    class Session:
-        def get_inputs(self):
-            return [Input("image", 3), Input("mask", 1)]
-        def run(self, names, feeds):
-            assert feeds["image"].shape == (1, 3, 64, 64)
-            assert feeds["mask"].shape == (1, 1, 64, 64)
-            assert set(np.unique(feeds["mask"])) == {0.0, 1.0}
-            return [feeds["image"]]
-    path = tmp_path / "mock.onnx"
-    path.write_bytes(b"only a mock fixture, not a model")
-    monkeypatch.setattr("vfs.repair._onnx_session", lambda *args: Session())
-    _, image, box = text_fixture()
-    mask, _ = build_mask(image, [box], {})
-    result = onnx_inpaint(image, mask, path)
-    assert result.shape == image.shape and result.dtype == np.uint8
-
-
 def test_real_rapidocr_english_cpu_and_cache(tmp_path):
     pytest.importorskip("rapidocr")
     image = np.full((240, 640, 3), 210, np.uint8)
@@ -217,7 +163,7 @@ def test_real_chinese_bilingual_mask_repair_with_brand_protection(tmp_path):
     mask, meta = build_mask(image, selection["selected"], {})
     actual = np.any(image != clean, axis=2)
     assert np.all(mask[actual] > 0)
-    output, support = composite_local(image, conventional_inpaint(image, mask), mask)
+    output, support = composite_local(image, clean, mask)
     assert np.array_equal(output[support == 0], image[support == 0])
     final_text = detector.detect(output)
     assert len(final_text) == 1 and "BRAND" in final_text[0]["text"]
@@ -250,3 +196,22 @@ def test_truncated_ocr_bbox_recovers_missing_chinese_glyph(cut_side):
     assert meta["polygon_fallbacks"] == 0
     assert meta["edge_search_inconclusive"] == 0
     assert np.all(mask[:200] == 0)
+
+
+def test_reviewed_ad_overlay_and_subtitle_preserve_scene_text():
+    from vfs.ocr import reviewed_overlay_regions
+
+    frame_shape = (360, 640, 3)
+    scene_text = {"polygon": [[420, 30], [560, 30], [560, 58], [420, 58]],
+                  "text": "BRAND", "confidence": .99}
+    reviewed = [
+        {"kind": "ad_label", "box": [30, 20, 80, 44], "text": "广告"},
+        {"kind": "subtitle", "box": [220, 280, 412, 312], "text": "员工餐"},
+    ]
+    config = {"keep_words": ["BRAND"]}
+    groups = reviewed_overlay_regions([scene_text], frame_shape, config, reviewed)
+    assert [r["reason"] for r in groups["selected"]] == ["reviewed_ad_label", "reviewed_subtitle"]
+    assert groups["protected"][0]["text"] == "BRAND"
+    mask, _ = build_mask(np.zeros(frame_shape, np.uint8), groups["selected"], {})
+    assert mask[30, 55] == mask[300, 316] == 255
+    assert mask[44, 490] == 0

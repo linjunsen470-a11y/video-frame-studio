@@ -53,17 +53,6 @@ def polygon_mask(shape: tuple, regions: list[dict], dilate: int = 0) -> np.ndarr
     return mask
 
 
-def background_complexity(image: np.ndarray, mask: np.ndarray) -> dict:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    outer = cv2.dilate(mask, np.ones((21, 21), np.uint8)) > 0
-    ring = outer & ~(cv2.dilate(mask, np.ones((5, 5), np.uint8)) > 0)
-    if not np.any(ring):
-        return {"edge_density": 0.0, "gray_std": 0.0}
-    edges = cv2.Canny(gray, 70, 160)
-    return {"edge_density": float(np.mean(edges[ring] > 0)),
-            "gray_std": float(np.std(gray[ring]))}
-
-
 def check_image(original: np.ndarray, edited: np.ndarray, mask: np.ndarray,
                 selected: list[dict], detector, config: dict,
                 prior_hashes: list[str] | None = None,
@@ -125,9 +114,9 @@ def check_image(original: np.ndarray, edited: np.ndarray, mask: np.ndarray,
         if residuals:
             result["issues"].append("subtitle_residual")
         # Whole-frame OCR may miss a single truncated character. Look for
-        # unchanged high-contrast outlined strokes just beyond detected text.
-        # This is deliberately conservative; a positive is a reason to retry
-        # or review, not proof that an arbitrary natural edge is text.
+        # unchanged high-contrast edges just beyond detected text. Use these
+        # edges to locate an enlarged OCR check, since scene edges can look
+        # identical to subtitle strokes in a grayscale image.
         gray = cv2.cvtColor(edited, cv2.COLOR_BGR2GRAY)
         near_dark = cv2.dilate((gray < 70).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
         styled = (gray > 160) & near_dark & ~support
@@ -145,13 +134,17 @@ def check_image(original: np.ndarray, edited: np.ndarray, mask: np.ndarray,
         suspicious = styled & (guard > 0)
         result["persistent_stroke_pixels"] = int(suspicious.sum())
         if suspicious.sum() > config.get("max_persistent_stroke_pixels", 16):
-            result["issues"].append("possible_stroke_residual")
             ys, xs = np.where(suspicious)
-            # A focused, enlarged OCR is only paid for when the cheap guard fires.
             x0, x1 = max(0, int(xs.min())-16), min(gray.shape[1], int(xs.max())+17)
             y0, y1 = max(0, int(ys.min())-16), min(gray.shape[0], int(ys.max())+17)
             local = cv2.resize(edited[y0:y1, x0:x1], None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-            result["focused_residual_ocr"] = detector.detect(local)
+            local_edges = cv2.resize(suspicious[y0:y1, x0:x1].astype(np.uint8),
+                                     None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST) > 0
+            focused = [region for region in detector.detect(local)
+                       if region["text"].strip()
+                       and np.any(local_edges & (polygon_mask(local.shape, [region], 2) > 0))]
+            result["focused_residual_ocr"] = focused
+            result["issues" if focused else "warnings"].append("possible_stroke_residual")
         result["ocr_checked"] = True
     except Exception as exc:
         result["ocr_checked"] = False
