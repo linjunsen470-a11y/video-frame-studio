@@ -9,9 +9,7 @@ from pathlib import Path
 import re
 import sys
 
-from vfs.config import load_config, load_dotenv, validate_config, ROOT
-from vfs.util import digest, output_lock
-from vfs.pipeline import run, quality_only, prepare_selection
+from vfs.runtime import cloud_startup_allowed
 
 
 def main(argv=None) -> int:
@@ -26,15 +24,22 @@ def main(argv=None) -> int:
     parser.add_argument("--subtitle-mode", choices=("auto", "subtitle", "all", "manual"))
     parser.add_argument("--resume", action="store_true")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--qc-only", action="store_true", help="Audit existing PNGs locally")
-    mode.add_argument("--prepare", action="store_true", help="Generate local candidate sheets without any Gemini calls")
+    mode.add_argument("--qc-only", action="store_true", help="Audit existing PNGs without decoding video")
+    mode.add_argument("--prepare", action="store_true", help="Generate candidate sheets without any Gemini calls")
     mode.add_argument("--select-frame", action="append", help="Edit a prepared frame ID; repeat in priority order")
     provider = parser.add_mutually_exclusive_group()
     provider.add_argument("--offline", action="store_true", help="Skip all Gemini work; keep strict deterministic gates")
     provider.add_argument("--mock-gemini", action="store_true", help="Test only; explicitly simulated AI results")
     parser.add_argument("--keep-intermediates", action="store_true")
     args = parser.parse_args(argv)
+    if not cloud_startup_allowed():
+        return 1
+
     try:
+        from vfs.config import ROOT, load_config, load_dotenv, validate_config
+        from vfs.pipeline import prepare_selection, quality_only, run
+        from vfs.util import digest, output_lock
+
         load_dotenv(ROOT / ".env")
         cfg = load_config(args.config)
         mapping = (("count", "run", "count"), ("candidates", "video", "candidates"),

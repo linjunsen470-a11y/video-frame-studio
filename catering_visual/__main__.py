@@ -6,14 +6,14 @@ import os
 from pathlib import Path
 import sys
 
-from .design import asset_path, inventory, load_plan, validate_plan
+from vfs.runtime import cloud_startup_allowed
+
 from .presets import PRESETS, STYLES
-from .render import inspect_gallery, render_gallery, write_json
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Prepare, render and inspect local photo galleries")
-    modes = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description="Prepare, render and inspect photo galleries in Codex Cloud")
+    modes = parser.add_subparsers(dest="command")
     analyze = modes.add_parser("analyze", help="List local photo metadata for agent review")
     analyze.add_argument("input", type=Path)
     analyze.add_argument("--out", type=Path)
@@ -31,8 +31,15 @@ def main(argv=None):
     inspect.add_argument("output", type=Path)
     inspect.add_argument("--plan", type=Path)
     args = parser.parse_args(argv)
+    if not cloud_startup_allowed():
+        return 1
+    if args.command is None:
+        parser.error("the following arguments are required: command")
 
     try:
+        from .design import asset_path, inventory, load_plan, validate_plan
+        from .render import inspect_gallery, render_gallery, write_json
+
         if args.command in {"analyze", "plan"} and args.out and args.out.suffix.lower() != ".json":
             raise ValueError("--out must be a .json file for analyze and plan")
         if args.command == "analyze":

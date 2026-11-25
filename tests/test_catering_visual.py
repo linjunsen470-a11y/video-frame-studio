@@ -3,14 +3,27 @@
 import json
 from pathlib import Path
 import shutil
+import sys
 
 from PIL import Image, ImageDraw
 import pytest
 
-from catering_visual.__main__ import main
+from catering_visual.__main__ import main as gallery_main
 from catering_visual.design import digest
 from catering_visual.presets import PRESETS, STYLES, rectangles
 from catering_visual.typography import coverage, select_font, system_font
+from vfs import runtime
+
+
+@pytest.fixture
+def main(monkeypatch, tmp_path):
+    if sys.platform != "linux":
+        pytest.skip("gallery processing requires Linux")
+    workspace = tmp_path / "workspace"
+    for name in ("library-files", "scratch", "shared"):
+        (workspace / name).mkdir(parents=True)
+    monkeypatch.setattr(runtime, "CLOUD_WORKSPACE", workspace)
+    return gallery_main
 
 
 @pytest.fixture
@@ -33,7 +46,7 @@ def write(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
 
-def test_cli_plan_render_repeat_revise_and_audit(assets, tmp_path):
+def test_cli_plan_render_repeat_revise_and_audit(assets, tmp_path, main):
     inventory = tmp_path / "inventory.json"
     assert main(["analyze", str(assets), "--out", str(inventory)]) == 0
     assert len(read(inventory)["assets"]) == 4
@@ -79,7 +92,7 @@ def test_presets_keep_photo_slots_in_bounds_with_gutters(preset):
         assert all(r <= x or u <= l or b <= y or v <= t for x, y, u, v in boxes[i+1:])
 
 
-def test_missing_asset_and_duplicate_photo_are_reported(assets, tmp_path):
+def test_missing_asset_and_duplicate_photo_are_reported(assets, tmp_path, main):
     plan = tmp_path / "design.json"
     out = tmp_path / "gallery"
     assert main(["plan", str(assets), "--out", str(plan), "--page", "food-grid-4",
@@ -94,7 +107,7 @@ def test_missing_asset_and_duplicate_photo_are_reported(assets, tmp_path):
 
 
 @pytest.mark.parametrize("style", STYLES)
-def test_chinese_text_and_overflow(assets, tmp_path, style):
+def test_chinese_text_and_overflow(assets, tmp_path, style, main):
     if not shutil.which("fc-match"):
         pytest.skip("fontconfig not installed")
     path, font_index = system_font("Noto Sans CJK SC:lang=zh-cn")
