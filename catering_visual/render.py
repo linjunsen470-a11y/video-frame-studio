@@ -89,8 +89,14 @@ def encode_delivery(canvas):
         fitted = canvas if size == canvas.size else canvas.resize(size, Image.Resampling.LANCZOS)
         for quality, subsampling in ((90, 0), (90, 2), (85, 2), (80, 2), (75, 2)):
             buffer = io.BytesIO()
-            fitted.save(buffer, format="JPEG", quality=quality, optimize=True,
-                        progressive=True, subsampling=subsampling)
+            try:
+                fitted.save(buffer, format="JPEG", quality=quality, optimize=True,
+                            progressive=True, subsampling=subsampling)
+            except OSError:
+                if subsampling != 0:
+                    raise
+                # Some encoders cannot buffer high-detail 4:4:4 output.
+                continue
             data = buffer.getvalue()
             if len(data) <= MAX_BYTES:
                 return data, size, quality
