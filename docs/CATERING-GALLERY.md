@@ -6,6 +6,8 @@
 
 ## 安装
 
+在 Codex Cloud 运行图集命令。程序会先执行 [运行环境检查](../README.md#运行环境)。
+
 在仓库根目录运行。现有 `.venv` 已安装 Pillow，可直接复用。单独运行图集只需 Python 3.12、仓库锁定的 Pillow 版本和字体。Debian/Ubuntu 上可安装 `fontconfig` 与 `fonts-noto-cjk`。无需 API Key。
 
 ## 从素材到图集

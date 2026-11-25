@@ -7,6 +7,12 @@
 字幕是否全部检出、被遮挡背景是否真实、人物/产品是否自然，仍受 OCR、启发式和生成模型能力限制。
 不承诺规避任何平台的 AI 内容检测、SynthID 或标注机制。
 
+## 运行环境
+
+请在该仓库的 Codex Cloud 环境运行 `python pipeline.py` 和 `python -m catering_visual`。
+处理命令会在加载配置、读取素材或写输出前检查 Linux 托管工作区。普通本机和无法确认的环境会提示并以状态码 `1` 退出。
+识别依据是已有云环境提供的 `/workspace/library-files`、`/workspace/scratch` 和 `/workspace/shared`。`--help` 仍可查询命令用法。
+
 ## 小红书团餐图文与实拍图集
 
 用 `$xiaohongshu-catering-editorial` 调用
