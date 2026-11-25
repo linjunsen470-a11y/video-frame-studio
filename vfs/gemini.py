@@ -159,18 +159,13 @@ class GeminiGateway:
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    @contextmanager
-    def _quota_lock(self):
-        """Serialize paid requests across output folders in this installation."""
-        quotas = self.config.get("quota")
-        if self.mock or not quotas:
-            yield None
-            return
+    def _quota_path(self) -> Path | None:
+        """Path to the cross-directory local quota ledger, or None when disabled."""
+        if self.mock or not self.config.get("quota"):
+            return None
         path = Path(__file__).resolve().parents[1] / ".cache" / "gemini-quota.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.with_suffix(".lock").open("a+b") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            yield path
+        return path
 
     def _reserve_quota(self, path: Path, model: str, tokens: int) -> None:
         quotas = self.config["quota"]
@@ -178,39 +173,43 @@ class GeminiGateway:
         limits = quotas.get(model, quotas["fallback"])
         rpm = min(self.rpm, limits["rpm"])
         pacific = ZoneInfo("America/Los_Angeles")
-        try:
-            entries = json.loads(path.read_text()) if path.exists() else []
-            if not isinstance(entries, list):
-                raise ValueError
-            for entry in entries:
-                if (not isinstance(entry["model"], str) or
-                        not math.isfinite(entry["time"]) or
-                        type(entry["tokens"]) is not int or entry["tokens"] <= 0):
-                    raise ValueError
-        except (OSError, KeyError, TypeError, ValueError, OverflowError):
-            raise GeminiError("Shared Gemini quota ledger is unreadable") from None
         if tokens > limits["tpm"]:
             raise BudgetExceeded(f"Gemini input estimate exceeds local TPM limit for {model}")
+        lock_path = path.with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         while True:
-            now = time.time()
-            today = datetime.fromtimestamp(now, pacific).date()
-            entries = [entry for entry in entries if entry["time"] > now - 60 or
-                       datetime.fromtimestamp(entry["time"], pacific).date() >= today]
-            matching = [entry for entry in entries if entry["model"] == model]
-            if sum(datetime.fromtimestamp(entry["time"], pacific).date() == today
-                   for entry in matching) >= limits["rpd"]:
-                raise BudgetExceeded(f"Gemini local daily request limit reached for {model}")
-            recent = [entry for entry in matching if entry["time"] > now - 60]
-            wait = max((entry["time"] + 60 / rpm - now for entry in matching), default=0)
-            remaining = sum(entry["tokens"] for entry in recent)
-            for entry in sorted(recent, key=lambda item: item["time"]):
-                if remaining + tokens <= limits["tpm"]:
-                    break
-                remaining -= entry["tokens"]
-                wait = max(wait, entry["time"] + 60 - now)
-            if wait <= 0:
-                _atomic_json(path, [*entries, {"model": model, "time": now, "tokens": tokens}])
-                return
+            with lock_path.open("a+b") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    entries = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+                    if not isinstance(entries, list):
+                        raise ValueError
+                    for entry in entries:
+                        if (not isinstance(entry["model"], str) or
+                                not math.isfinite(entry["time"]) or
+                                type(entry["tokens"]) is not int or entry["tokens"] <= 0):
+                            raise ValueError
+                except (OSError, KeyError, TypeError, ValueError, OverflowError):
+                    raise GeminiError("Shared Gemini quota ledger is unreadable") from None
+                now = time.time()
+                today = datetime.fromtimestamp(now, pacific).date()
+                entries = [entry for entry in entries if entry["time"] > now - 60 or
+                           datetime.fromtimestamp(entry["time"], pacific).date() >= today]
+                matching = [entry for entry in entries if entry["model"] == model]
+                if sum(datetime.fromtimestamp(entry["time"], pacific).date() == today
+                       for entry in matching) >= limits["rpd"]:
+                    raise BudgetExceeded(f"Gemini local daily request limit reached for {model}")
+                recent = [entry for entry in matching if entry["time"] > now - 60]
+                wait = max((entry["time"] + 60 / rpm - now for entry in recent), default=0)
+                remaining = sum(entry["tokens"] for entry in recent)
+                for entry in sorted(recent, key=lambda item: item["time"]):
+                    if remaining + tokens <= limits["tpm"]:
+                        break
+                    remaining -= entry["tokens"]
+                    wait = max(wait, entry["time"] + 60 - now)
+                if wait <= 0:
+                    _atomic_json(path, [*entries, {"model": model, "time": now, "tokens": tokens}])
+                    return
             time.sleep(wait)
 
     def _read_ledger(self) -> dict:
@@ -380,7 +379,8 @@ class GeminiGateway:
         )
 
     def _request(self, prompt: str, images: list[tuple[bytes, str]],
-                 generation: dict, parse: Callable, mock_result: Callable) -> np.ndarray:
+                 generation: dict, parse: Callable, mock_result: Callable,
+                 validate: Callable[[np.ndarray], np.ndarray]) -> np.ndarray:
         model = self.image_model or ("mock-edit" if self.mock else "")
         if not model:
             raise GeminiUnavailable("Configure image_model")
@@ -394,7 +394,8 @@ class GeminiGateway:
         }
         key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
         cache = self.path / f"{key}.json"
-        with self._locked(), self._quota_lock() as quota_path:
+        quota_path = self._quota_path()
+        with self._locked():
             ledger = self._read_ledger()
             if cache.exists():
                 try:
@@ -405,12 +406,13 @@ class GeminiGateway:
                     digest = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
                     if digest != cached.get("value_sha256"):
                         raise ValueError
-                    value = _decode_image(base64.b64decode(value, validate=True))
+                    decoded = _decode_image(base64.b64decode(value, validate=True))
+                    aligned = validate(decoded)
                     ledger["cache_hits"] = ledger.get("cache_hits", 0) + 1
                     self._write_ledger(ledger)
-                    return value
+                    return aligned
                 except (ValueError, TypeError, InvalidResponse):
-                    # Corrupt *response* caches can be replaced. Never reset ledger.
+                    # Corrupt or unaligned *response* caches can be replaced. Never reset ledger.
                     cache.unlink(missing_ok=True)
             if not self.mock:
                 self._get_client()  # Missing credentials cannot consume reservations.
@@ -441,6 +443,7 @@ class GeminiGateway:
                     else:
                         response = self._sdk_call(model, prompt, images, generation)
                         value = parse(response)
+                    aligned = validate(value)
                     entry.update(self._estimate_usage(response, model))
                     entry["status"] = "ok"
                     self._write_ledger(ledger)
@@ -448,7 +451,7 @@ class GeminiGateway:
                     serialized = base64.b64encode(data).decode("ascii")
                     digest = hashlib.sha256(json.dumps(serialized, sort_keys=True).encode()).hexdigest()
                     _atomic_json(cache, {"version": _VERSION, "value": serialized, "value_sha256": digest})
-                    return value
+                    return aligned
                 except (KeyboardInterrupt, SystemExit):
                     raise  # Reservation intentionally survives interruption.
                 except Exception as error:
@@ -459,6 +462,8 @@ class GeminiGateway:
                     entry["status_code"] = code if isinstance(code, int) else None
                     self._write_ledger(ledger)
                     if retry >= self.retries or not self._retryable(error):
+                        if isinstance(error, InvalidResponse):
+                            raise error from None
                         suffix = f" (status {code})" if isinstance(code, int) else ""
                         raise GeminiError(f"Gemini edit failed after {retry + 1} attempt(s){suffix}; "
                                           "see sanitized ledger") from None
@@ -537,48 +542,50 @@ class GeminiGateway:
         def fake():
             return cv2.inpaint(frame_input, guide_input, 3, cv2.INPAINT_TELEA)
 
-        edited = self._request(prompt, images, generation, parse, fake)
-        if abs((edited.shape[1] / edited.shape[0]) / (rw / rh) - 1) > .03:
-            raise InvalidResponse("Generated frame changed aspect ratio")
-        resized = cv2.resize(edited, (canvas_width, canvas_height), interpolation=cv2.INTER_LANCZOS4)
-        proposal = resized[top:top+height, left:left+width]
-        self.last_unaligned_proposal = proposal
-        excluded = cv2.dilate(binary, np.ones((15, 15), np.uint8))
-        reference = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        target = cv2.cvtColor(proposal, cv2.COLOR_BGR2GRAY)
-        usable = excluded == 0
-        matrix = np.eye(2, 3, dtype=np.float32)
-        registration, correlation = "static", None
-        if not usable.any() or np.mean(cv2.absdiff(reference, target)[usable]) > 3.0:
-            # Compare scene geometry at a proxy resolution. This avoids treating
-            # high-frequency differences from the provider's resampling as motion.
-            proxy = resize_long(reference, 640)
-            proxy_size = proxy.shape[1], proxy.shape[0]
-            reduced = cv2.resize(target, proxy_size, interpolation=cv2.INTER_AREA)
-            valid = cv2.resize(usable.astype(np.uint8), proxy_size, interpolation=cv2.INTER_NEAREST)
-            criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-5)
-            try:
-                correlation, warp = cv2.findTransformECC(proxy, reduced, matrix, cv2.MOTION_AFFINE,
-                                                          criteria, valid, 5)
-            except cv2.error:
-                raise InvalidResponse("Generated frame could not be aligned") from None
-            if not math.isfinite(correlation) or correlation < .96 or not np.isfinite(warp).all():
-                raise InvalidResponse("Generated frame has insufficient alignment confidence")
-            scale = np.diag([proxy_size[0]/width, proxy_size[1]/height, 1.])
-            inverse = np.vstack((cv2.invertAffineTransform(warp), [0., 0., 1.]))
-            matrix = (np.linalg.inv(scale) @ inverse @ scale)[:2]
-            registration = "affine"
-        corners = np.array([[[0., 0.], [width-1., 0.], [0., height-1.], [width-1., height-1.]]])
-        if np.linalg.norm(cv2.transform(corners, matrix) - corners, axis=2).max() > .02 * max(width, height):
-            raise InvalidResponse("Generated frame shifted beyond alignment limit")
-        if registration != "static":
-            coverage = cv2.warpAffine(np.full((height, width), 255, np.uint8), matrix,
-                                      (width, height), flags=cv2.INTER_LINEAR)
-            if np.any(coverage[binary > 0] != 255):
-                raise InvalidResponse("Generated frame does not cover edit mask")
-            proposal = cv2.warpAffine(proposal, matrix, (width, height), flags=cv2.INTER_LINEAR)
-        self.last_edit_info = {"mode": "full_frame", "aspect_ratio": f"{rw}:{rh}",
-                               "input_size": list(request_size), "alignment": registration,
-                               "transform": matrix.tolist(), "correlation": correlation,
-                               "proposal_only": True, "mock": self.mock}
-        return proposal
+        def align(edited: np.ndarray) -> np.ndarray:
+            if abs((edited.shape[1] / edited.shape[0]) / (rw / rh) - 1) > .03:
+                raise InvalidResponse("Generated frame changed aspect ratio")
+            resized = cv2.resize(edited, (canvas_width, canvas_height), interpolation=cv2.INTER_LANCZOS4)
+            proposal = resized[top:top+height, left:left+width]
+            self.last_unaligned_proposal = proposal
+            excluded = cv2.dilate(binary, np.ones((15, 15), np.uint8))
+            reference = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            target = cv2.cvtColor(proposal, cv2.COLOR_BGR2GRAY)
+            usable = excluded == 0
+            matrix = np.eye(2, 3, dtype=np.float32)
+            registration, correlation = "static", None
+            if not usable.any() or np.mean(cv2.absdiff(reference, target)[usable]) > 3.0:
+                # Compare scene geometry at a proxy resolution. This avoids treating
+                # high-frequency differences from the provider's resampling as motion.
+                proxy = resize_long(reference, 640)
+                proxy_size = proxy.shape[1], proxy.shape[0]
+                reduced = cv2.resize(target, proxy_size, interpolation=cv2.INTER_AREA)
+                valid = cv2.resize(usable.astype(np.uint8), proxy_size, interpolation=cv2.INTER_NEAREST)
+                criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-5)
+                try:
+                    correlation, warp = cv2.findTransformECC(proxy, reduced, matrix, cv2.MOTION_AFFINE,
+                                                             criteria, valid, 5)
+                except cv2.error:
+                    raise InvalidResponse("Generated frame could not be aligned") from None
+                if not math.isfinite(correlation) or correlation < .96 or not np.isfinite(warp).all():
+                    raise InvalidResponse("Generated frame has insufficient alignment confidence")
+                scale = np.diag([proxy_size[0]/width, proxy_size[1]/height, 1.])
+                inverse = np.vstack((cv2.invertAffineTransform(warp), [0., 0., 1.]))
+                matrix = (np.linalg.inv(scale) @ inverse @ scale)[:2]
+                registration = "affine"
+            corners = np.array([[[0., 0.], [width-1., 0.], [0., height-1.], [width-1., height-1.]]])
+            if np.linalg.norm(cv2.transform(corners, matrix) - corners, axis=2).max() > .02 * max(width, height):
+                raise InvalidResponse("Generated frame shifted beyond alignment limit")
+            if registration != "static":
+                coverage = cv2.warpAffine(np.full((height, width), 255, np.uint8), matrix,
+                                          (width, height), flags=cv2.INTER_LINEAR)
+                if np.any(coverage[binary > 0] != 255):
+                    raise InvalidResponse("Generated frame does not cover edit mask")
+                proposal = cv2.warpAffine(proposal, matrix, (width, height), flags=cv2.INTER_LINEAR)
+            self.last_edit_info = {"mode": "full_frame", "aspect_ratio": f"{rw}:{rh}",
+                                   "input_size": list(request_size), "alignment": registration,
+                                   "transform": matrix.tolist(), "correlation": correlation,
+                                   "proposal_only": True, "mock": self.mock}
+            return proposal
+
+        return self._request(prompt, images, generation, parse, fake, align)

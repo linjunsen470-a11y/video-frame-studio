@@ -59,8 +59,11 @@ def resolve_input(value: str, cache: Path, config: dict) -> Path:
         request = Request(value, headers={"User-Agent": "VideoFrameStudio/0.1"})
         with build_opener(_PublicRedirect()).open(request,
                 timeout=config["download_timeout_seconds"]) as response, partial.open("wb") as f:
-            if "text/html" in response.headers.get("Content-Type", ""):
+            ctype = response.headers.get("Content-Type", "").lower()
+            if "text/html" in ctype:
                 raise ValueError("URL is a webpage; use a direct media download URL")
+            if any(token in ctype for token in ("mpegurl", "dash+xml")):
+                raise ValueError("Streaming playlists are unsupported; download a standalone video file first")
             size = 0
             while data := response.read(1024 * 1024):
                 size += len(data)
@@ -73,6 +76,19 @@ def resolve_input(value: str, cache: Path, config: dict) -> Path:
     finally:
         partial.unlink(missing_ok=True)
     return target
+
+
+def _stream_rotation(stream: dict) -> int:
+    raw = stream.get("tags", {}).get("rotate")
+    if raw is None:
+        for side in stream.get("side_data_list", []):
+            if "rotation" in side:
+                raw = side["rotation"]
+                break
+    try:
+        return int(round(float(raw))) % 360 if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def probe(path: Path, config: dict) -> dict:
@@ -106,7 +122,8 @@ def probe(path: Path, config: dict) -> dict:
     return {"width": width, "height": height, "duration": duration,
             "codec": stream.get("codec_name"), "pixel_format": fmt,
             "frame_rate": stream.get("avg_frame_rate"),
-            "color_space": stream.get("color_space", "unspecified")}
+            "color_space": stream.get("color_space", "unspecified"),
+            "rotation": _stream_rotation(stream)}
 
 
 def scan_candidates(path: Path, output: Path, video_config: dict, selection: dict,
@@ -156,6 +173,8 @@ def scan_candidates(path: Path, output: Path, video_config: dict, selection: dic
         raise ValueError("Unsupported video: no usable frame rate")
     next_sample, last_time, frame_index, sample_index, scene = 0., -1., -1, 0, 0
     scan_issues = []
+    if info["rotation"]:
+        scan_issues.append(f"rotation_metadata_not_applied:{info['rotation']}")
     try:
         while cap.grab():
             frame_index += 1

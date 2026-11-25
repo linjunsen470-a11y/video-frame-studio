@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .masks import polygon_mask
 from .util import read_image, resize_long
 
 
@@ -40,17 +41,6 @@ def phash(image: np.ndarray) -> str:
 
 def hash_distance(a: str, b: str) -> int:
     return (int(a, 16) ^ int(b, 16)).bit_count()
-
-
-def polygon_mask(shape: tuple, regions: list[dict], dilate: int = 0) -> np.ndarray:
-    mask = np.zeros(shape[:2], np.uint8)
-    for region in regions:
-        pts = np.asarray(region["polygon"], np.int32).reshape(-1, 2)
-        if len(pts) >= 3:
-            cv2.fillPoly(mask, [pts], 255)
-    if dilate:
-        mask = cv2.dilate(mask, np.ones((2 * dilate + 1,) * 2, np.uint8))
-    return mask
 
 
 def check_image(original: np.ndarray, edited: np.ndarray, mask: np.ndarray,
@@ -119,7 +109,8 @@ def check_image(original: np.ndarray, edited: np.ndarray, mask: np.ndarray,
         # identical to subtitle strokes in a grayscale image.
         gray = cv2.cvtColor(edited, cv2.COLOR_BGR2GRAY)
         near_dark = cv2.dilate((gray < 70).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
-        styled = (gray > 160) & near_dark & ~support
+        near_bright = cv2.dilate((gray > 190).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+        styled = (((gray > 160) & near_dark) | ((gray < 70) & near_bright)) & ~support
         if protected_regions:
             styled[polygon_mask(original.shape, protected_regions, 4) > 0] = False
         guard = np.zeros(original.shape[:2], np.uint8)

@@ -30,6 +30,14 @@ def load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _merge(base: dict, override: dict) -> None:
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _merge(base[key], value)
+        else:
+            base[key] = value
+
+
 def load_config(path: Path | None = None) -> dict:
     with (ROOT / "configs/default.toml").open("rb") as f:
         config = tomllib.load(f)
@@ -44,7 +52,7 @@ def load_config(path: Path | None = None) -> dict:
                 unknown = set(values) - set(config[section])
                 if unknown:
                     raise ValueError(f"Unknown settings in {section}: {sorted(unknown)}")
-            config[section].update(values)
+            _merge(config[section], values)
     if image_model := os.getenv("GEMINI_IMAGE_MODEL"):
         config["gemini"]["image_model"] = image_model
     return config

@@ -17,6 +17,11 @@ __pycache__/
 .coverage.*
 htmlcov/
 .DS_Store
+.vscode/
+.idea/
+*.tmp
+*.partial
+*.log
 
 # Job data, private media, and rendered deliverables
 /runs/
@@ -30,6 +35,7 @@ artifacts/
 *.m4v
 *.avi
 *.webm
+*.ts
 *.onnx
 *.pt
 *.pth
@@ -42,6 +48,11 @@ artifacts/
 .checkpoint.json
 **/selection/index.json
 **/selection/sheet-*.png
+**/report.md
+**/report.json
 **/qc_report.md
 **/qc_report.json
 **/gallery-report.json
+**/post.md
+**/preview.html
+**/pages/*.jpg

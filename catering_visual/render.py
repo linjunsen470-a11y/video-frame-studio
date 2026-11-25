@@ -31,7 +31,7 @@ def _opaque(image):
     return background
 
 
-def render_page(page, root):
+def load_page_assets(page, root):
     photos, sources = [], []
     for name in page["photos"]:
         path = asset_path(root, name)
@@ -40,15 +40,23 @@ def render_page(page, root):
             raise ValueError(f"Fully transparent photo: {name}")
         photos.append(_opaque(image))
         sources.append({"src": name, "sha256": digest(path)})
-    if len(photos) == 2 and sources[0]["sha256"] == sources[1]["sha256"]:
-        raise ValueError("Landscape pair requires two distinct frames")
+    if len(photos) == 1:
+        if photos[0].width > photos[0].height:
+            raise ValueError("Landscape frame needs a second landscape frame")
+    else:
+        if sources[0]["sha256"] == sources[1]["sha256"]:
+            raise ValueError("Landscape pair requires two distinct frames")
+        if any(photo.width <= photo.height for photo in photos):
+            raise ValueError("Both frames of a landscape pair must be horizontal")
+    return photos, sources
 
+
+def render_page(page, root):
+    photos, sources = load_page_assets(page, root)
     width, height = SIZE
     canvas = Image.new("RGB", SIZE, BACKGROUND)
     if len(photos) == 1:
         photo = photos[0]
-        if photo.width > photo.height:
-            raise ValueError("Landscape frame needs a second landscape frame")
         if page.get("fit", "cover") == "cover":
             canvas = ImageOps.fit(photo, SIZE, Image.Resampling.LANCZOS,
                                   centering=tuple(page.get("focal", [0.5, 0.5])))
@@ -59,8 +67,6 @@ def render_page(page, root):
             canvas.paste(fitted, (x, y))
             boxes = [(x, y, x+fitted.width, y+fitted.height)]
     else:
-        if any(photo.width <= photo.height for photo in photos):
-            raise ValueError("Both frames of a landscape pair must be horizontal")
         ratios = [photo.height / photo.width for photo in photos]
         slot_width = max(1, min(width, int((height-GAP) / sum(ratios))))
         sizes = [(slot_width, max(1, int(slot_width*ratio))) for ratio in ratios]
@@ -81,9 +87,10 @@ def encode_delivery(canvas):
     for width in (900, 810, 720, 630, 600):
         size = (width, width*4//3)
         fitted = canvas if size == canvas.size else canvas.resize(size, Image.Resampling.LANCZOS)
-        for quality in (90, 85, 80, 75):
+        for quality, subsampling in ((90, 0), (90, 2), (85, 2), (80, 2), (75, 2)):
             buffer = io.BytesIO()
-            fitted.save(buffer, format="JPEG", quality=quality, optimize=True)
+            fitted.save(buffer, format="JPEG", quality=quality, optimize=True,
+                        progressive=True, subsampling=subsampling)
             data = buffer.getvalue()
             if len(data) <= MAX_BYTES:
                 return data, size, quality
@@ -95,6 +102,17 @@ def copy_markdown(copy):
     return f"# {copy['title'].strip()}\n\n{copy['body'].strip()}\n\n{topics}\n".encode()
 
 
+def copy_warnings(copy):
+    warnings = []
+    title_len = len(copy["title"].strip())
+    if title_len > 20:
+        warnings.append(f"Title exceeds Xiaohongshu 20-char limit ({title_len} chars)")
+    body_len = len("".join(copy["body"].split()))
+    if body_len > 150:
+        warnings.append(f"Body exceeds 150-char guideline ({body_len} chars)")
+    return warnings
+
+
 def atomic_output(path, write):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
@@ -102,6 +120,7 @@ def atomic_output(path, write):
         try:
             write(handle)
             handle.flush()
+            os.fsync(handle.fileno())
             os.replace(staging, path)
         finally:
             staging.unlink(missing_ok=True)
@@ -163,7 +182,7 @@ def render_gallery(plan, plan_path, output, page_ids):
             raise ValueError("Managed outputs would overwrite the design or a source")
         previous = {}
         if page_ids and report_path.exists():
-            prior = json.loads(report_path.read_text())
+            prior = json.loads(report_path.read_text(encoding="utf-8"))
             if prior["version"] == 2:
                 previous = {row["id"]: row for row in prior["pages"]}
         rows = []
@@ -196,6 +215,7 @@ def render_gallery(plan, plan_path, output, page_ids):
                     for row in rows if row.get("bytes", 0) > MAX_BYTES]
         if any(count > 1 for count in duplicates.values()):
             warnings.append("The same source photo appears multiple times")
+        warnings.extend(copy_warnings(plan["copy"]))
         text = copy_markdown(plan["copy"])
         atomic_output(post, lambda handle: handle.write(text))
         report = {"version": 2, "pages": rows, "warnings": warnings,
@@ -206,7 +226,7 @@ def render_gallery(plan, plan_path, output, page_ids):
 
 
 def inspect_gallery(output, plan=None, plan_path=None):
-    report = json.loads((output / "gallery-report.json").read_text())
+    report = json.loads((output / "gallery-report.json").read_text(encoding="utf-8"))
     if report.get("version") != 2:
         raise ValueError("Expected a version 2 Xiaohongshu gallery report")
     expected = {page["id"]: page for page in plan["pages"]} if plan else {}

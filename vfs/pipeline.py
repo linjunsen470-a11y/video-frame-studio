@@ -13,9 +13,9 @@ import numpy as np
 from . import __version__
 from .config import semantic_config
 from .gemini import GeminiGateway, GeminiError, BudgetExceeded, InvalidResponse
-from .masks import build_mask
+from .masks import build_mask, polygon_mask
 from .ocr import OCRDetector, reviewed_overlay_regions, select_regions
-from .quality import check_saved_png, polygon_mask
+from .quality import check_saved_png
 from .repair import composite_local
 from .report import write_report
 from .util import (atomic_json, read_json, file_sha256, digest, read_image, resize_long,
@@ -81,6 +81,9 @@ def _candidate(candidate: dict, output: Path, cfg: dict, detector: OCRDetector,
         mask_config = {**cfg["mask"], "protect_regions": cfg["ocr"].get("protect_regions", [])}
         mask, mask_meta = build_mask(original, selected, mask_config, attempt)
         mask[protection] = 0
+        pixels = int(np.count_nonzero(mask))
+        mask_meta["pixels"] = pixels
+        mask_meta["area_fraction"] = float(pixels / mask.size)
         trial["mask"] = mask_meta
         method = "unchanged"
         try:
@@ -106,8 +109,10 @@ def _candidate(candidate: dict, output: Path, cfg: dict, detector: OCRDetector,
             final[protection] = original[protection]
             final_mask[protection] = 0
             if selected and np.array_equal(final, original):
-                item["issues"] = ["no_pixels_changed"]
-                break
+                trial.update({"method": method, "qc": {"passed": False, "issues": ["no_pixels_changed"]}})
+                item["attempts"].append(trial)
+                item.update({"method": method, "qc": trial["qc"]})
+                continue
             stage = output / ".cache/qc"
             staged_image, staged_mask = stage / f"{item['id']}.png", stage / f"{item['id']}_mask.png"
             write_png(staged_image, final)
