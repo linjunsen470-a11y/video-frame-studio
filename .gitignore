@@ -26,6 +26,10 @@ htmlcov/
 # Job data, private media, and rendered deliverables
 /runs/
 /catering-xhs/
+/style_samples/
+/voice-profile.md
+/BRAND_VOICE.md
+/.agents/local/
 output*/
 artifacts/
 .cache/
