@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import sys
+import tomllib
 
 from vfs.runtime import cloud_startup_allowed
 
@@ -30,11 +32,18 @@ def main(argv=None) -> int:
     if not cloud_startup_allowed():
         return 1
 
+    safe_errors: tuple[type[BaseException], ...] = (
+        ValueError, FileNotFoundError, PermissionError,
+        json.JSONDecodeError, tomllib.TOMLDecodeError,
+    )
     try:
         from vfs.config import ROOT, load_config, load_dotenv, validate_config
+        from vfs.gemini import GeminiError
+        from vfs.ocr import OCRUnavailable
         from vfs.pipeline import prepare_selection, quality_only, run
         from vfs.util import output_lock
 
+        safe_errors = (*safe_errors, OCRUnavailable, GeminiError)
         load_dotenv(ROOT / ".env")
         cfg = load_config(args.config)
         mapping = (("count", "run", "count"), ("candidates", "video", "candidates"),
@@ -62,7 +71,9 @@ def main(argv=None) -> int:
             return 0
         if not args.select_frame:
             parser.error("Prepare candidates locally, then pass explicit --select-frame IDs")
-        if not cfg["gemini"]["mock"] and not os.getenv(cfg["gemini"]["api_key_env"]):
+        reviewed = cfg["ocr"].get("reviewed_frames", {})
+        needs_gemini = not (reviewed and all(reviewed.get(fid) == [] for fid in args.select_frame))
+        if needs_gemini and not cfg["gemini"]["mock"] and not os.getenv(cfg["gemini"]["api_key_env"]):
             raise ValueError("GEMINI_API_KEY is missing. Configure .env for editing, or use --mock-gemini in tests")
         report = run(args.input, args.output, cfg, args.resume, selected=args.select_frame)
         passed = sum(item["status"] == "passed" for item in report["items"])
@@ -72,8 +83,8 @@ def main(argv=None) -> int:
         print("Interrupted. Re-run the same command with --resume.", file=sys.stderr)
         return 130
     except Exception as exc:
-        # Provider errors can contain credential-bearing URLs; never print their message.
-        message = str(exc) if isinstance(exc, (ValueError, FileNotFoundError)) else type(exc).__name__
+        # Provider errors can contain credential-bearing URLs; only display sanitized/local errors.
+        message = str(exc) if isinstance(exc, safe_errors) else type(exc).__name__
         print(f"Error: {message}", file=sys.stderr)
         return 1
 

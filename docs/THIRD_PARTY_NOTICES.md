@@ -39,8 +39,7 @@
 - 系统 `ffmpeg` / `ffprobe` 是外部可执行程序。FFmpeg 主体为 LGPL-2.1-or-later，启用 GPL 组件的构建会适用 GPL；具体以使用的构建及 `ffmpeg -buildconf` 为准。本项目不分发该二进制。[官方说明](https://ffmpeg.org/legal.html)
 - 合成测试视频仅由本项目生成几何图形与文字，没有下载第三方影片。生成器使用机器已安装的字体，**不打包字体文件**；Noto 字体具有自己的 OFL 许可。传入自定义字体时，其授权由该字体的来源决定。[Noto CJK](https://github.com/notofonts/noto-cjk)
 - 调研了 GPL-3.0 的 `ComfyUI-Inpaint-CropAndStitch`，但**没有复制其实现、引入其依赖或分发其代码**。局部裁剪、NumPy 掩码赋值与有限羽化为本项目独立实现。
-- 没有复制所调研字幕去除应用、smart-thumbnailer、lighthouse、IOPaint 或 LaMa 的源码。通过公开 API 使用 OpenCV、PySceneDetect、RapidOCR 等依赖，相关设计参考见 [RESEARCH.md](RESEARCH.md)。
-- 可选 Level 3 只提供一个明确输入/输出协议的 ONNX 适配器，**不下载、不提供 LaMa 权重**。第三方导出模型的许可、可信来源与协议需要单独核实。
+- 没有复制外部字幕去除应用、smart-thumbnailer、lighthouse、IOPaint 或 LaMa 的源码，仅通过公开 API 使用 OpenCV、PySceneDetect、RapidOCR 等依赖。
 - 默认环境不引入 PyTorch、PaddlePaddle、ComfyUI、Gradio、FastAPI 或网页服务。Gemini 是显式启用的远程 API，未把服务输出误称为开源模型权重。
 
 若将本项目改成包含全部依赖/模型的 Docker 镜像、独立可执行文件或商业安装包，需以实际分发的版本和二进制重新收集上游许可与 notices；本文件不代替那些完整许可文本。

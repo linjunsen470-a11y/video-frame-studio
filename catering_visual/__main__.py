@@ -36,7 +36,7 @@ def main(argv=None):
 
     try:
         from .design import asset_path, inventory, load_plan, validate_plan
-        from .render import inspect_gallery, render_gallery, render_page, write_json
+        from .render import inspect_gallery, load_page_assets, render_gallery, write_json
 
         if args.command in {"analyze", "plan"} and args.out and args.out.suffix.lower() != ".json":
             raise ValueError("--out must be a .json file for analyze and plan")
@@ -58,7 +58,7 @@ def main(argv=None):
             for page in pages:
                 if any(asset_path(root, name) == args.out.resolve() for name in page["photos"]):
                     raise ValueError("Plan output would overwrite a source photo")
-                render_page(page, root)
+                load_page_assets(page, root)
             write_json(args.out, value)
             print(args.out)
             return 0

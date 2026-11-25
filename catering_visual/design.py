@@ -1,17 +1,19 @@
 """Read local assets and validate the editable gallery design."""
 
 from hashlib import file_digest
+import io
 import json
 import math
 from pathlib import Path
 import re
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageCms, ImageOps
 
 FORMATS = {"JPEG", "PNG", "WEBP"}
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_PIXELS = 32_000_000
 IDENTIFIER = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
+_SRGB = ImageCms.createProfile("sRGB")
 
 
 def digest(path):
@@ -30,12 +32,29 @@ def asset_path(root, name):
     return path
 
 
+def _to_srgb(image, profile):
+    if not profile:
+        return image
+    try:
+        src = ImageCms.ImageCmsProfile(io.BytesIO(profile))
+        rgb = ImageCms.profileToProfile(image.convert("RGB"), src, _SRGB, outputMode="RGB")
+        if "A" in image.getbands():
+            rgb = rgb.convert("RGBA")
+            rgb.putalpha(image.getchannel("A"))
+            return rgb
+        return rgb.convert("RGBA")
+    except (OSError, ValueError, ImageCms.PyCMSError):
+        return image
+
+
 def photo_image(path):
     with Image.open(path) as image:
         if (image.format not in FORMATS or image.width * image.height > MAX_PIXELS
                 or getattr(image, "is_animated", False)):
             raise ValueError(f"Expected a still JPEG, PNG or WebP under {MAX_PIXELS} pixels: {path.name}")
-        return ImageOps.exif_transpose(image).convert("RGBA")
+        profile = image.info.get("icc_profile")
+        rgba = ImageOps.exif_transpose(image).convert("RGBA")
+        return _to_srgb(rgba, profile)
 
 
 def inventory(root):
@@ -67,11 +86,6 @@ def require_keys(value, keys, name):
 def number(value, low, high, name):
     if type(value) not in (float, int) or not low <= value <= high or not math.isfinite(value):
         raise ValueError(f"{name} must be a number between {low} and {high}")
-
-
-def color(value, name):
-    if not isinstance(value, str) or not HEX.fullmatch(value):
-        raise ValueError(f"{name} must be an RGB color such as #F5E9D9")
 
 
 def text_value(value, field):
