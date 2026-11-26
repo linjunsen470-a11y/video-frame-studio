@@ -22,12 +22,13 @@ Run the frame pipeline when the task also needs frame preparation.
 4. On interruption or recoverable API budget/network failure, rerun the exact
    command with `--resume`. Raising a budget requires the user's allowed budget;
    previously authorized budget adjustments do not need another confirmation.
-5. Read `report.md` first, then only relevant `report.json` item(s). Exit 0 means
+5. Read `report.md` first, then only relevant `report.json` item(s). For an editing run, exit 0 means
    requested count met, 2 means quality shortfall, 1 means an error, 130 interruption.
 6. Run `python pipeline.py --output OUTPUT --qc-only` before delivering an
-   existing/restored run. It uses no Gemini calls and decodes no video.
-7. Visually inspect the repaired areas before using `images/*.png`. Keep matching originals,
-   final masks and reports. Link actual comparison previews for failures when available.
+   existing/restored run. It uses no Gemini calls and decodes no video. Report the number
+   of PNGs that passed this audit out of the originally requested count, including any shortfall.
+7. Visually inspect the repaired areas before using `images/*.png`. Give the user accessible links
+   to the approved PNGs, matching originals, final masks and reports. Link actual comparison previews for failures when available.
    Deliver Xiaohongshu JPEGs and post copy with the gallery CLI and audit the result.
 
 ## Hard invariants

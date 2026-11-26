@@ -41,7 +41,7 @@ def main(argv=None) -> int:
         from vfs.gemini import GeminiError
         from vfs.ocr import OCRUnavailable
         from vfs.pipeline import prepare_selection, quality_only, run
-        from vfs.util import output_lock
+        from vfs.util import output_lock, read_json
 
         safe_errors = (*safe_errors, OCRUnavailable, GeminiError)
         load_dotenv(ROOT / ".env")
@@ -59,7 +59,10 @@ def main(argv=None) -> int:
         if args.qc_only:
             with output_lock(args.output):
                 result = quality_only(args.output, cfg if args.config else None)
-            print(f"{result['status']}: {args.output / 'qc_report.md'}")
+                run_status = read_json(args.output / "report.json")["status"]
+            passed = sum(item["status"] == "passed" for item in result["items"])
+            print(f"{result['status']} | PNG 复核通过 {passed}/{result['requested_count']} 张 | "
+                  f"原任务 {run_status} | {args.output / 'qc_report.md'}")
             return 0 if result["status"] == "qc_passed" else 2
         if not args.input:
             parser.error("--input is required unless --qc-only")
