@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import pytest
 
+import pipeline as cli
 from vfs.config import load_config
 from vfs.gemini import GeminiGateway
 from vfs.ocr import OCRDetector, OCRUnavailable
@@ -187,6 +188,24 @@ def test_completed_resume_audits_without_new_api_or_decode(tmp_path, config, mon
     assert resumed["api"]["mock_calls"] == first["api"]["mock_calls"]
     assert len(scans) == 1
     assert {p.name: p.read_bytes() for p in (output / "images").glob("*.png")} == manifest
+
+
+def test_qc_only_reports_partial_delivery_and_preserves_resume(tmp_path, config, monkeypatch, capsys):
+    first = synthetic(1)
+    source, output, _ = prepare_run(monkeypatch, tmp_path, [first, synthetic(2)])
+    monkeypatch.setattr(pipeline, "OCRDetector", lambda *args: ReferenceDetector([first]))
+    monkeypatch.setattr(cli, "cloud_startup_allowed", lambda: True)
+    selected = ["frame001", "frame002"]
+    pipeline.prepare_selection(str(source), output, config)
+    report = pipeline.run(str(source), output, config, selected=selected)
+    assert report["status"] == "partial"
+    original_report = (output / "report.json").read_bytes()
+
+    assert cli.main(["--output", str(output), "--qc-only"]) == 0
+    assert "qc_passed | PNG 复核通过 1/2 张 | 原任务 partial" in capsys.readouterr().out
+    assert (output / "report.json").read_bytes() == original_report
+    resumed = pipeline.run(str(source), output, config, resume=True, selected=selected)
+    assert resumed["status"] == "partial"
 
 
 def test_interrupted_resume_reuses_passed_candidates(tmp_path, config, monkeypatch):
